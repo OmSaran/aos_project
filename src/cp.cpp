@@ -8,15 +8,25 @@
 #include <sys/types.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <unistd.h>
 
 //! C++17 Filesystem for concat
 #include <filesystem>
 
+#include "buffer-lcm.h"
 #include "cxxopts.hpp"
 
 #define CHMOD_MODE_BITS \
   (S_ISUID | S_ISGID | S_ISVTX | S_IRWXU | S_IRWXG | S_IRWXO)
 
+#define MIN(a, b) a < b ? a : b
+#define MAX(a, b) a > b ? a : b
+
+#define likely(x)       __builtin_expect((x),1)
+#define unlikely(x)     __builtin_expect((x),0)
+
+//! coreutils/cp.c hardcodes this to 128KiB
+enum { IO_BUFSIZE = 128 * 1024 };
 struct cp_options
 {
     bool recursive = false;
@@ -54,12 +64,68 @@ bool copy_dir(const std::string& src_name_in, const std::string& dst_name_in,
         std::string src_name = (std::filesystem::path(src_name_in) / entry);
         std::string dst_name = (std::filesystem::path(dst_name_in) / entry);
 
-        ok &= copy (src_name, dst_name, dst_dirfd,
-                    dst_name.c_str() + (dst_relname_in.length() - dst_name_in.length()),
-                    new_dst, opt);
+        ok &= copy(src_name, dst_name, dst_dirfd,
+                   dst_name.c_str() + (dst_relname_in.length() - dst_name_in.length()),
+                   new_dst, opt);
     }
 
     return ok;
+}
+
+/**
+ * @brief copy regular file open on `src_fd` to `dst_fd`
+ * *abuf for temp storage, allocating it lazily
+ * copy no more than `max_n_read` bytes
+ * 
+ * @param src_fd 
+ * @param dest_fd 
+ * @param buf_size 
+ * @param src_name 
+ * @param dst_name 
+ * @param max_n_read 
+ * @param total_n_read 
+ * @return true sucessful completion
+ * @return false 
+ */
+bool sparse_copy(int src_fd, int dest_fd, size_t buf_size,
+                 const std::string& src_name, const std::string& dst_name,
+                 uintmax_t max_n_read, off_t& total_n_read)
+{
+    char* buf = (char *)aligned_alloc(getpagesize(), buf_size);
+    total_n_read = 0;
+    off_t psize = 0;
+
+    while(max_n_read)
+    {
+        ssize_t n_read = read(src_fd, buf, MIN(max_n_read, buf_size));
+        if (unlikely(n_read < 0))
+        {
+            if (errno == EINTR) continue;
+            fprintf(stderr, "error reading %s", src_name.c_str());
+            return false;
+        }
+        if (n_read == 0) break;
+
+        max_n_read -= n_read;
+        total_n_read += n_read;
+
+        //! loop over input buffer in chunks
+        //! TODO: Handle holes; currently this loop is useless
+        while(n_read)
+        {
+            size_t csize = MIN(buf_size, n_read);
+
+            bool last_chunk = n_read == csize;
+
+            if (last_chunk)
+            {
+                psize += csize;
+
+                // if ()
+            }
+
+        }
+    }
 }
 
 bool copy_reg(const std::string& src_name, const std::string& dst_name,
@@ -68,12 +134,18 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
               mode_t dst_mode, mode_t omitted_permissions, bool& new_dst,
               const struct stat& src_sb)
 {
+    char* buf;
+    off_t n_read;
     bool return_val = true;
     int source_desc, dest_desc;
     mode_t extra_permissions;
     struct stat sb;
     struct stat src_open_sb;
     mode_t temporary_mode;
+
+    size_t buf_size, src_blk_size;
+    size_t blcm_max, blcm;
+
     source_desc = open(src_name.c_str(), O_RDONLY);
     if (source_desc < 0)
     {
@@ -151,14 +223,53 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
         extra_permissions = 0;
     }
 
-    //! Copy all data
+    //! TODO: Add support for sparse files here!
+
+    //! advise sequential read
     posix_fadvise(source_desc, 0, 0, POSIX_FADV_SEQUENTIAL);
 
-    //! TODO: Add support for sparse files here!
+    buf_size = MIN(SIZE_MAX / 2 + 1, MAX(IO_BUFSIZE, sb.st_blksize));
+    src_blk_size = MIN(SIZE_MAX / 2 + 1, MAX(IO_BUFSIZE, src_open_sb.st_blksize));
+    
+    /* Compute the least common multiple of the input and output
+       buffer sizes, adjusting for outlandish values.  */
+    blcm_max = SIZE_MAX;
+    blcm = buffer_lcm(src_blk_size, buf_size, blcm_max);
+
+    /* Do not bother with a buffer larger than the input file, plus one
+       byte to make sure the file has not grown while reading it.  */
+    if (S_ISREG (src_open_sb.st_mode) && src_open_sb.st_size < buf_size)
+    {
+        buf_size = src_open_sb.st_size + 1;
+    }
+
+    /* However, stick with a block size that is a positive multiple of
+       blcm, overriding the above adjustments.  Watch out for
+       overflow.  */
+    buf_size += blcm - 1;
+    buf_size -= buf_size % blcm;
+    if (buf_size == 0 || blcm_max < buf_size)
+    {
+        buf_size = blcm;
+    }
+    sparse_copy(source_desc, dest_desc, buf_size,
+                src_name, dst_name, UINTMAX_MAX, n_read);
+    //! TODO: --preserve timestamps, ownerships, xattr, author, acl
+    //! TODO: remove extra permissions
 
 
 close_src_and_dst_desc:
+    if (close(dest_desc) < 0)
+    {
+        fprintf(stderr, "failed to close %s", dst_name.c_str());
+        return_val = false;
+    }
 close_src_desc:
+    if (close(source_desc) < 0)
+    {
+        fprintf(stderr, "failed to close %s", src_name.c_str());
+        return_val = false;
+    }
     return return_val;
 }
 /**
