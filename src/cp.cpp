@@ -65,7 +65,7 @@ bool copy_dir(const std::string& src_name_in, const std::string& dst_name_in,
         std::string dst_name = (std::filesystem::path(dst_name_in) / entry);
 
         ok &= copy(src_name, dst_name, dst_dirfd,
-                   dst_name.c_str() + (dst_relname_in.length() - dst_name_in.length()),
+                   dst_name.c_str() + (dst_name_in.length() - dst_relname_in.length()),
                    new_dst, opt);
     }
 
@@ -516,16 +516,20 @@ bool do_copy(const std::vector<std::string>& args, const cp_options& opt)
         int n_files = args.size() - 1;
         for (int i = 0; i < n_files; i++)
         {
-            const auto& file = args[i];
-            std::string dst_rel = std::filesystem::path(file).filename();
-            if (dst_rel == "..") {
-                dst_rel.clear();
+            const auto& file = std::filesystem::path(args[i]);
+            auto it = file.end();
+            it--;
+            if (*it == "") it--;
+            
+            //! Think what will happen on cp -r A/.. B/
+            if (*it == "..") {
+                it++;
             }
-            std::string dst_name = std::filesystem::path(lastfile) / dst_rel;
+            std::string dst_name = std::filesystem::path(lastfile) / *it;
 
             ok &= copy(file, dst_name, target_dirfd, 
-                       std::string_view(dst_name).substr(lastfile.length(), dst_rel.length()),
-                       new_dst, opt);
+                       std::string_view(dst_name).substr(lastfile.length(), (*it).string().length()),
+                       !new_dst, opt);
         }
     }
 
