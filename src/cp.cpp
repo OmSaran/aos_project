@@ -19,8 +19,8 @@
 #define CHMOD_MODE_BITS \
   (S_ISUID | S_ISGID | S_ISVTX | S_IRWXU | S_IRWXG | S_IRWXO)
 
-#define MIN(a, b) a < b ? a : b
-#define MAX(a, b) a > b ? a : b
+#define MIN(a, b) ((a < b) ? a : b)
+#define MAX(a, b) ((a > b) ? a : b)
 
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
@@ -78,7 +78,9 @@ bool copy_dir(const std::string& src_name_in, const std::string& dst_name_in,
  * copy no more than `max_n_read` bytes
  * 
  * @param src_fd 
- * @param dest_fd 
+ * @param dest_fd
+ * @param abuf - this is to reuse the same buffer if it was 
+ *               allocated in a prev call to sparse_copy
  * @param buf_size 
  * @param src_name 
  * @param dst_name 
@@ -87,17 +89,25 @@ bool copy_dir(const std::string& src_name_in, const std::string& dst_name_in,
  * @return true sucessful completion
  * @return false 
  */
-bool sparse_copy(int src_fd, int dest_fd, size_t buf_size,
+bool sparse_copy(int src_fd, int dest_fd, char **abuf, size_t buf_size,
                  const std::string& src_name, const std::string& dst_name,
                  uintmax_t max_n_read, off_t& total_n_read)
 {
-    char* buf = (char *)aligned_alloc(getpagesize(), buf_size);
+    if (!*abuf)
+    {
+        *abuf = (char *)aligned_alloc(getpagesize(), buf_size);
+        if (unlikely(*abuf == NULL))
+        {
+            fprintf(stderr, "failed to allocate memory for buffer %d %ld", getpagesize(), buf_size);
+            return false;
+        }
+    }
     total_n_read = 0;
     off_t psize = 0;
 
     while(max_n_read)
     {
-        ssize_t n_read = read(src_fd, buf, MIN(max_n_read, buf_size));
+        ssize_t n_read = read(src_fd, *abuf, MIN(max_n_read, buf_size));
         if (unlikely(n_read < 0))
         {
             if (errno == EINTR) continue;
@@ -110,22 +120,30 @@ bool sparse_copy(int src_fd, int dest_fd, size_t buf_size,
         total_n_read += n_read;
 
         //! loop over input buffer in chunks
-        //! TODO: Handle holes; currently this loop is useless
+        //! TODO: Handle holes
+        const char *ptr = (const char *)*abuf;
         while(n_read)
         {
-            size_t csize = MIN(buf_size, n_read);
+            ssize_t n_write = write(dest_fd, ptr, n_read);
 
-            bool last_chunk = n_read == csize;
-
-            if (last_chunk)
+            if (unlikely(n_write < 0))
             {
-                psize += csize;
+                if (likely(errno == EINTR)) continue;
 
-                // if ()
+                fprintf(stderr, "error writing to %s", dst_name.c_str());
+                return false;
             }
-
+            if (unlikely(n_write == 0)) {
+                errno = ENOSPC;
+                fprintf(stderr, "error writing to %s (out of space)", dst_name.c_str());
+                return false;
+            }
+            ptr += n_write;
+            n_read -= n_write;
         }
     }
+
+    return true;
 }
 
 bool copy_reg(const std::string& src_name, const std::string& dst_name,
@@ -134,7 +152,7 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
               mode_t dst_mode, mode_t omitted_permissions, bool& new_dst,
               const struct stat& src_sb)
 {
-    char* buf;
+    char* buf = NULL;
     off_t n_read;
     bool return_val = true;
     int source_desc, dest_desc;
@@ -228,8 +246,8 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
     //! advise sequential read
     posix_fadvise(source_desc, 0, 0, POSIX_FADV_SEQUENTIAL);
 
-    buf_size = MIN(SIZE_MAX / 2 + 1, MAX(IO_BUFSIZE, sb.st_blksize));
-    src_blk_size = MIN(SIZE_MAX / 2 + 1, MAX(IO_BUFSIZE, src_open_sb.st_blksize));
+    buf_size = MIN(SIZE_MAX / 2UL + 1UL, (size_t)MAX(IO_BUFSIZE, sb.st_blksize));
+    src_blk_size = MIN(SIZE_MAX / 2UL + 1Ul, (size_t)MAX(IO_BUFSIZE, src_open_sb.st_blksize));
     
     /* Compute the least common multiple of the input and output
        buffer sizes, adjusting for outlandish values.  */
@@ -238,7 +256,7 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
 
     /* Do not bother with a buffer larger than the input file, plus one
        byte to make sure the file has not grown while reading it.  */
-    if (S_ISREG (src_open_sb.st_mode) && src_open_sb.st_size < buf_size)
+    if (S_ISREG (src_open_sb.st_mode) && (size_t)src_open_sb.st_size < buf_size)
     {
         buf_size = src_open_sb.st_size + 1;
     }
@@ -252,7 +270,7 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
     {
         buf_size = blcm;
     }
-    sparse_copy(source_desc, dest_desc, buf_size,
+    sparse_copy(source_desc, dest_desc, &buf, buf_size,
                 src_name, dst_name, UINTMAX_MAX, n_read);
     //! TODO: --preserve timestamps, ownerships, xattr, author, acl
     //! TODO: remove extra permissions
@@ -270,6 +288,13 @@ close_src_desc:
         fprintf(stderr, "failed to close %s", src_name.c_str());
         return_val = false;
     }
+
+    /**
+     * @note the reason why buf is allocated inside sparse_copy,
+     *       but freed here is so that it can be reused when copying multiple
+     *       blocks
+     */
+    free(buf);
     return return_val;
 }
 /**
@@ -427,6 +452,23 @@ bool copy(const std::string& src_name, const std::string& dst_name,
     return delayed_ok;
 }
 
+
+static inline bool
+must_be_working_directory (char const *f)
+{
+  /* Return true for ".", "./.", ".///./", etc.  */
+  while (*f++ == '.')
+    {
+      if (*f != '/')
+        return !*f;
+      while (*++f == '/')
+        continue;
+      if (!*f)
+        return true;
+    }
+  return false;
+}
+
 bool do_copy(const std::vector<std::string>& args, const cp_options& opt)
 {
     if (args.size() == 0) 
@@ -440,25 +482,56 @@ bool do_copy(const std::vector<std::string>& args, const cp_options& opt)
         return false;
     }
     
-    //! Check if lastfile is actually a directory
+    //! Check if lastfile is actually a directory (target_directory_operand)
     const auto& lastfile = args.back();
-    int target_dirfd = open(lastfile.c_str(), O_DIRECTORY);
-    if (target_dirfd < 0) {
+    // int 
+    int target_dirfd;
+    //! TODO: Opt: if directory is ., then just use AT_FDCWD
+    if (must_be_working_directory(lastfile.c_str()))
+    {
+        target_dirfd = AT_FDCWD;
+    }
+    else
+    {
+        target_dirfd = open(lastfile.c_str(), O_DIRECTORY | O_PATH);
+    }
+    bool new_dst = (errno == ENOENT);
+    bool ok = true;
+    if (target_dirfd < 0) 
+    {
         //! Since last file is not a directory, must be only arguments
         if (args.size() > 2)
         {
             fprintf(stderr, "last arg could not be opened as a dir / invalid no. of arguments");
             return false;
         }
-
         //! Check if this file does not exist
-        int err = errno;
-        return copy(args[0], args[1], AT_FDCWD, args[1], err == ENOENT, opt);
+        ok = copy(args[0], args[1], AT_FDCWD, args[1], !new_dst, opt);
+    }
+    else
+    {
+        /* cp file1...filen edir
+         Copy the files 'file1' through 'filen'
+         to the existing directory 'edir'. */
+        int n_files = args.size() - 1;
+        for (int i = 0; i < n_files; i++)
+        {
+            const auto& file = args[i];
+            std::string dst_rel = std::filesystem::path(file).filename();
+            if (dst_rel == "..") {
+                dst_rel.clear();
+            }
+            std::string dst_name = std::filesystem::path(lastfile) / dst_rel;
+
+            ok &= copy(file, dst_name, target_dirfd, 
+                       std::string_view(dst_name).substr(lastfile.length(), dst_rel.length()),
+                       new_dst, opt);
+        }
     }
 
     //! TODO: Copy multiple files to a directory
 
-    return true;
+    return ok;
 }
 
 int main(int argc, char** argv)

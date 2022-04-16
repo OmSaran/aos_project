@@ -12,3 +12,8 @@ target_include_directories(cp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/)
 # cxxopts library
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libs/cxxopts)
 target_link_libraries(cp cxxopts)
+
+# release ops
+add_compile_options(
+    "$<$<CONFIG:RELEASE>:-O3 -march=native>"
+)
