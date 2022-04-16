@@ -23,4 +23,28 @@ if [ $? -ne 0 ]; then
     exit 0
 fi
 echo "Passed!"
-rm _test _test.copy
+rm _test.copy
+
+echo "Test #2: Copy file to directory"
+mkdir _testdir
+./"$1" _test _testdir/
+cmp -s _test _testdir/_test
+if [ $? -ne 0 ]; then
+    echo "test failed, files are not the same."
+    rm -r _testdir _test
+    exit 0
+fi
+echo "Passed!"
+rm _test
+
+echo "Test #3: Copy directory to directory"
+mkdir _testdir2
+./"$1" -r _testdir _testdir2/
+cmp -s _testdir/_test _testdir2/_testdir/_test
+if [ $? -ne 0 ]; then
+    echo "test failed, files are not the same."
+    rm -r _testdir _testdir2
+    exit 0
+fi
+echo "Passed!"
+rm -r _testdir _testdir2
