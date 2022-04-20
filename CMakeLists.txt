@@ -17,3 +17,4 @@ target_link_libraries(cp cxxopts)
 add_compile_options(
     "$<$<CONFIG:RELEASE>:-O3 -march=native>"
 )
+target_link_libraries(cp cxxopts uring)
