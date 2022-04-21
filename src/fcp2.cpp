@@ -10,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 
+#include <linux/stat.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <liburing.h>
@@ -52,9 +53,12 @@ enum {
     FCP_OP_READ,
     FCP_OP_WRITE,
     FCP_OP_CREATFILE,
+    FCP_OP_STAT_COPY_JOB,
 };
 
 // TODO: Fix memory leaks
+
+class CopyJob;
 
 class RequestMeta {
 public:
@@ -64,10 +68,14 @@ public:
     string dest_dirpath;
     int type;
     int reg_fd;
+    CopyJob* cp_job;
+    struct statx *statbuf;
 
     RequestMeta(int type) {
         this->type = type;
         this->reg_fd = -1;
+        cp_job = NULL;
+        statbuf = NULL;
     }
 };
 
@@ -115,11 +123,69 @@ public:
 // src, dst, dst_dir // TODO: Probably compute dst_dir
 typedef array<string, 3> copyjob;
 
+class CopyJob {
+private:
+    path src;
+    path dst;
+    string src_path;
+    string dst_path;
+    bool submitted_stat_op;
+    ssize_t size;
+    ssize_t n_bytes_copied;
+public:
+    CopyJob(string src, string dst) {
+        this->src = path(src);
+        this->dst = path(dst);
+        this->src_path = this->src.string();
+        this->dst_path = this->dst.string();
+        this->n_bytes_copied = 0;
+        this->size = -1;
+        this->submitted_stat_op = false;
+    }
+
+    string& get_src_path() {
+        return this->src_path;
+    }
+
+    string& get_dst_path() {
+        return this->dst_path;
+    }
+
+    bool is_stat_submitted() {
+        return this->submitted_stat_op;
+    }
+
+    void mark_stat_submitted() {
+        this->submitted_stat_op = true;
+    }
+
+    string get_dst_dir() {
+        return this->dst.parent_path().string();
+    }
+
+    ssize_t get_size() {
+        return this->size;
+    }
+    
+    void set_size(ssize_t size) {
+        cout << "Setting the size " << size << " for the file: " << this->dst_path << endl;
+        this->size = size;
+    }
+
+    ssize_t get_bytes_copied() {
+        return this->n_bytes_copied;
+    }
+    
+    void add_bytes_copied(ssize_t num_bytes) {
+        this->n_bytes_copied += num_bytes;
+    }
+};
+
 
 // Data structures
 struct io_uring ring;
 // TODO: We can do better than queue
-queue<copyjob*>* cp_jobs;
+queue<CopyJob*>* cp_jobs;
 vector<io_uring_cqe*>* pending_cqes;
 unordered_set<string>* created_dest_dirs;
 RegFDAllocator* fd_alloc;
@@ -254,7 +320,7 @@ void process_getdents(io_uring_cqe *cqe) {
                 cout << "dirent: " << dent->d_name << endl;
 
                 // TODO: Compute the dest dirpath instead.
-                copyjob* job = new copyjob({src_path.string(), dst_path.string(), meta->dest_dirpath});
+                CopyJob *job = new CopyJob(src_path, dst_path);
                 cp_jobs->push(job);
             } 
             else if (dent->d_type == DT_DIR) {
@@ -266,6 +332,13 @@ void process_getdents(io_uring_cqe *cqe) {
 
     assert(meta->reg_fd != -1);
     fd_alloc->release(meta->reg_fd);
+}
+
+void process_stat_copy_job(struct io_uring_cqe *cqe) {
+    RequestMeta *meta = (RequestMeta *) cqe->user_data;
+    meta->cp_job->set_size(meta->statbuf->stx_size);
+
+    free(meta->statbuf);
 }
 
 /**
@@ -313,20 +386,31 @@ int process_cqe(io_uring_cqe *cqe) {
         } else {
             cout << "A create file operation completed: " << cqe->res << endl;
         }
+    } else if (meta->type == FCP_OP_STAT_COPY_JOB) {
+        if(cqe->res < 0) {
+            cerr << "A stat operation for copy job failed: " << strerror(-cqe->res) << endl;
+        } else {
+            cout << "A stat operation for copy job completed: " << cqe->res << endl;
+            process_stat_copy_job(cqe);
+        }
     }
 
     return 0;
 }
 
 // TODO: This can be further asynchronized/pipelined.
-void do_file_copy(string src, string dst) {
+void do_file_copy(string src, string dst, CopyJob* job) {
     struct io_uring_sqe *sqe;
     RequestMeta *meta;
+
+    ssize_t max_buf_size = 4096;
+    ssize_t bytes_to_copy = job->get_size() - job->get_bytes_copied();
+    cout << "bytes_to_copy = " << bytes_to_copy << endl;
 
     // TODO: Copy all file contents, not just bufsize
     // TODO: Fix memory leak.
     // TODO: Use registered buffers.
-    char *buf = (char *)calloc(1024 * 64, sizeof(char));
+    char *buf = (char *)calloc(bytes_to_copy, 1);
 
     int dst_reg_fd = fd_alloc->get_free();
     int src_reg_fd = fd_alloc->get_free();
@@ -372,7 +456,7 @@ void do_file_copy(string src, string dst) {
     sqe = io_uring_get_sqe(&ring);
     assert(sqe != NULL);
 
-    io_uring_prep_read(sqe, src_reg_fd, buf, 1024 * 64, 0);
+    io_uring_prep_read(sqe, src_reg_fd, buf, bytes_to_copy, 0);
     sqe->flags = IOSQE_FIXED_FILE;
     // hardlink won't fail for partial reads.
     sqe->flags |= IOSQE_IO_HARDLINK;
@@ -386,7 +470,7 @@ void do_file_copy(string src, string dst) {
     assert(sqe != NULL);
 
     // TODO: Use file size for deterministic copy size.
-    io_uring_prep_write(sqe, dst_reg_fd, buf, 1024 * 64, 0);
+    io_uring_prep_write(sqe, dst_reg_fd, buf, bytes_to_copy, 0);
     sqe->flags = IOSQE_FIXED_FILE;
     meta = new RequestMeta(FCP_OP_WRITE);
     io_uring_sqe_set_data(sqe, (void *)meta);
@@ -396,21 +480,39 @@ void do_file_copy(string src, string dst) {
 }
 
 void process_copy_jobs() {
-    copyjob* job;
+    CopyJob* job;
     cout << "Processing copy_jobs: " << cp_jobs->size() << endl;
     while(cp_jobs->size() > 0) {
         job = cp_jobs->front();
 
-        string src = job->at(0);
-        string dst = job->at(1);
-        string dst_dir = job->at(2);
+        if(job->get_size() < 0) {
+            if(job->is_stat_submitted()) {
+                break;
+            }
+            struct io_uring_sqe *sqe;
 
-        if(created_dest_dirs->find(dst_dir) != created_dest_dirs->end()) {
-            cout << "Found " << dst_dir << " in created destination directories set" << endl;
-            do_file_copy(src, dst);
+            // TODO: Fix memory leaks
+            struct statx *statbuf = (struct statx *)malloc(sizeof(struct statx));
+            RequestMeta *meta = new RequestMeta(FCP_OP_STAT_COPY_JOB);
+            meta->cp_job = job;
+            meta->statbuf = statbuf;
+
+            // This means that stat is not done yet.
+            sqe = io_uring_get_sqe(&ring);
+            assert(sqe != NULL);
+
+            io_uring_prep_statx(sqe, -1, job->get_src_path().c_str(), 0, STATX_SIZE, statbuf);
+            io_uring_sqe_set_data(sqe, meta);
+            io_uring_submit(&ring);
+            cout << "Submitted stat operation for " << job->get_dst_path() << endl;
+            job->mark_stat_submitted();
+            break;
+        } else if(created_dest_dirs->find(job->get_dst_dir()) != created_dest_dirs->end()) {
+            cout << "Found " << job->get_dst_dir() << " in created destination directories set" << endl;
+            do_file_copy(job->get_src_path(), job->get_dst_path(), job);
             cp_jobs->pop();
         } else {
-            cout << "Could not find " << dst_dir << " in created destination directories" << endl;
+            cout << "Could not find " << job->get_dst_dir() << " in created destination directories" << endl;
             break;
         }
     }
@@ -421,7 +523,7 @@ int main() {
     int files[R_FILE_SIZE];
     struct io_uring_cqe *cqe;
 
-    cp_jobs = new queue<copyjob*>();
+    cp_jobs = new queue<CopyJob*>();
     pending_cqes = new vector<io_uring_cqe*>();
     created_dest_dirs = new unordered_set<string>();
     fd_alloc = new RegFDAllocator(REG_FD_SIZE);
