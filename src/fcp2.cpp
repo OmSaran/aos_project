@@ -40,7 +40,7 @@ using std::filesystem::path;
 
 #define RINGSIZE 1024
 #define R_FILE_SIZE 100
-#define REG_FD_SIZE 4000
+#define REG_FD_SIZE 256
 #define IORING_OP_GETDENTS64 41
 #define DIR_BUF_SIZE 16384
 
