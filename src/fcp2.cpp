@@ -724,7 +724,7 @@ int main() {
     string dst_dir = "/home/ubuntu/project/aos_project/dst_dir";
 
     created_dest_dirs->insert("/home/ubuntu/project/aos_project");
-    process_dir("/home/ubuntu/linux-block", "/home/ubuntu/project/aos_project/dst_dir");
+    process_dir("/home/ubuntu/project/aos_project/build", "/home/ubuntu/project/aos_project/dst_dir");
 
     struct __kernel_timespec ts;
     ts.tv_nsec = 0;
@@ -759,6 +759,6 @@ int main() {
             io_uring_cqe_seen(&ring, cqe);
         }
         process_copy_jobs();
-        // process_dir_jobs();
+        process_dir_jobs();
     }
 }
