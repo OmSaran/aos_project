@@ -60,6 +60,11 @@ enum {
 
 class CopyJob;
 
+// TODO P2: Vectors are better
+unordered_set<string> dirjobs;
+// TODO P2: Should find a way without this
+unordered_set<string> submitted_readdirs;
+
 class RequestMeta {
 public:
     // TODO: Define getter/setter
@@ -142,7 +147,8 @@ private:
     ssize_t n_bytes_copied;
     int state;
     // file index
-    int fd;
+    int src_fd;
+    int dst_fd;
 public:
     CopyJob(string src, string dst) {
         this->src = path(src);
@@ -154,12 +160,20 @@ public:
         this->state = COPY_STAT_PENDING;
     }
 
-    void set_fd(int fd) {
-        this->fd = fd;
+    void set_src_fd(int fd) {
+        this->src_fd = fd;
     }
 
-    int get_fd() {
-        return this->fd;
+    int get_src_fd() {
+        return this->src_fd;
+    }
+
+    void set_dst_fd(int fd) {
+        this->dst_fd = fd;
+    }
+
+    int get_dst_fd() {
+        return this->dst_fd;
     }
 
     int get_state() {
@@ -290,15 +304,26 @@ void process_dir(string src_path, string dst_path) {
     struct io_uring_cqe *cqe;
     int num_wait = 0;
     int ret;
-    
 
-    // Prepare mkdir request
-    num_wait += prep_mkdir(dst_path);
+    path dst(dst_path);
+
+    // bool need_submission = false;
+    
+    if(created_dest_dirs->find(dst.parent_path()) != created_dest_dirs->end()) {
+        // Prepare mkdir request
+        num_wait += prep_mkdir(dst_path);
+        // need_submission = true;
+    } else {
+        dirjobs.insert(dst_path);
+    }
 
     (*dirent_buf_map)[src_path] = (uint8_t *)malloc(sizeof(uint8_t) * DIR_BUF_SIZE);
 
-    // Prepare readdir request
-    num_wait += prep_readdir(src_path, (*dirent_buf_map)[src_path], dst_path);
+    // if(submitted_readdirs.find(src_path) == submitted_readdirs.end()) {
+        // Prepare readdir request
+        num_wait += prep_readdir(src_path, (*dirent_buf_map)[src_path], dst_path);
+        // need_submission = true;
+    // }
 
     io_uring_submit(&ring);
 
@@ -306,6 +331,27 @@ void process_dir(string src_path, string dst_path) {
     // num_wait = 1;
     // ret = io_uring_submit_and_wait(&ring, 1);
     // assert(ret == num_wait);
+}
+
+
+void process_dir_jobs() {
+    vector<string> to_erase;
+    for(const auto& dir: dirjobs) {
+        path dst(dir);
+
+        if(created_dest_dirs->find(dst.parent_path()) != created_dest_dirs->end()) {
+            // If parent directory has been created, then create the directory
+            prep_mkdir(dst);
+            io_uring_submit(&ring);
+            to_erase.push_back(dir);
+        } else {
+            cout << "Could not find parent directory for " << dst.string() << endl;   
+        }
+    }
+
+    for(const auto& elem: to_erase) {
+        dirjobs.erase(elem);
+    } 
 }
 
 void process_getdents(io_uring_cqe *cqe) {
@@ -402,7 +448,8 @@ int process_cqe(io_uring_cqe *cqe) {
         // return 1;
     } else if (meta->type == FCP_OP_WRITE) {
         if(cqe->res < 0) {
-            cerr << "GOT CQE! A write operation failed: " << strerror(-cqe->res) << endl;
+            cerr << "GOT CQE! A write operation failed: " << strerror(-cqe->res) 
+                << ((CopyJob *)cqe->user_data)->get_dst_dir() << endl;
             exit(1);
         } else {
             cout << "GOT CQE! A write operation completed: " << cqe->res << endl;
@@ -427,33 +474,14 @@ int process_cqe(io_uring_cqe *cqe) {
     return 0;
 }
 
-// TODO: This can be further asynchronized/pipelined.
-void do_file_copy(CopyJob* job) {
+void _prep_copy_opens(CopyJob* job) {
     struct io_uring_sqe *sqe;
     RequestMeta *meta;
-
-    ssize_t max_buf_size = 4096;
-    ssize_t bytes_to_copy = job->get_size() - job->get_bytes_copied();
-    cout << "bytes_to_copy = " << bytes_to_copy << " for file " << job->get_dst_path() << endl;
-
-    // finished copying the file
-    if(bytes_to_copy == 0) {
-        assert(0);
-        job->set_state(COPY_CP_DONE);
-        return;
-    }
-
-    // TODO: Fix memory leak.
-    // TODO: Use registered buffers.
-    char *buf = (char *)calloc(bytes_to_copy, 1);
 
     int dst_reg_fd = fd_alloc->get_free();
     int src_reg_fd = fd_alloc->get_free();
     cout << "src_reg_fd = " << src_reg_fd << endl;
     cout << "dst_reg_fd = " << dst_reg_fd << endl;
-
-    // Submission chain.
-    // open(src) -> open(dst) -> read(src) -> write(src)
 
     // ***** BEGIN: Open src dir *****
     //
@@ -481,11 +509,45 @@ void do_file_copy(CopyJob* job) {
     io_uring_sqe_set_data(sqe, (void *) meta);
     // ***** END: Open/Create dst dir *****
 
+    job->set_src_fd(src_reg_fd);
+    job->set_dst_fd(dst_reg_fd);
+}
+
+// TODO: This can be further asynchronized/pipelined.
+void do_file_copy(CopyJob* job) {
+    struct io_uring_sqe *sqe;
+    RequestMeta *meta;
+
+    ssize_t max_buf_size = 4096;
+    ssize_t bytes_to_copy = job->get_size() - job->get_bytes_copied();
+    bytes_to_copy = max_buf_size < bytes_to_copy ? max_buf_size : bytes_to_copy;
+    cout << "bytes_to_copy = " << bytes_to_copy << " for file " << job->get_dst_path() << endl;
+
+    // finished copying the file
+    if(job->get_size() > 0 && bytes_to_copy == 0) {
+        cout << "Error: " << job->get_dst_path() << endl;
+        // assert(0);
+        job->set_state(COPY_CP_DONE);
+        return;
+    }
+
+    // TODO: Fix memory leak.
+    // TODO: Use registered buffers.
+    char *buf = (char *)calloc(bytes_to_copy, 1);
+
+    // Submission chain.
+    // open(src) -> open(dst) -> read(src) -> write(src) or read(src) -> write(src)
+
+    if(job->get_bytes_copied() == 0) {
+        // This means that this is the first write operation so we need to do open as well.
+        _prep_copy_opens(job);
+    }
+
     // ***** BEGIN: Read src file *****
     sqe = io_uring_get_sqe(&ring);
     assert(sqe != NULL);
 
-    io_uring_prep_read(sqe, src_reg_fd, buf, bytes_to_copy, 0);
+    io_uring_prep_read(sqe, job->get_src_fd(), buf, bytes_to_copy, 0);
     sqe->flags = IOSQE_FIXED_FILE;
     // hardlink won't fail for partial reads.
     sqe->flags |= IOSQE_IO_HARDLINK;
@@ -500,7 +562,7 @@ void do_file_copy(CopyJob* job) {
 
     // TODO: Use file size for deterministic copy size.
     // TODO: Skip success CQE unless it is the last write
-    io_uring_prep_write(sqe, dst_reg_fd, buf, bytes_to_copy, 0);
+    io_uring_prep_write(sqe, job->get_dst_fd(), buf, bytes_to_copy, 0);
     sqe->flags = IOSQE_FIXED_FILE;
     meta = new RequestMeta(FCP_OP_WRITE);
     meta->cp_job = job;
@@ -590,7 +652,8 @@ int main() {
     string src_dir = "/home/ubuntu/project/aos_project/src_dir";
     string dst_dir = "/home/ubuntu/project/aos_project/dst_dir";
 
-    process_dir("/home/ubuntu/project/aos_project/src_dir", "/home/ubuntu/project/aos_project/dst_dir");
+    created_dest_dirs->insert("/home/ubuntu/project/aos_project");
+    process_dir("/home/ubuntu/project/aos_project/build", "/home/ubuntu/project/aos_project/dst_dir");
 
     struct __kernel_timespec ts;
     ts.tv_nsec = 0;
@@ -613,7 +676,7 @@ int main() {
         ret = io_uring_wait_cqe_timeout(&ring, &cqe, &ts);
         if(ret != 0) {
             cerr << "Failed to get cqe: " << strerror(-ret) << endl;
-            if(cp_jobs->size() == 0) {
+            if(cp_jobs->size() == 0 && dirjobs.size() == 0) {
                 cout << "No pending jobs and failed to get cqe, exiting" << endl;
                 sync();
                 exit(0);
@@ -625,5 +688,6 @@ int main() {
             io_uring_cqe_seen(&ring, cqe);
         }
         process_copy_jobs();
+        process_dir_jobs();
     }
 }
