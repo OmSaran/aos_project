@@ -239,8 +239,8 @@ public:
 
 // Data structures
 struct io_uring ring;
-// TODO: We can do better than queue
-queue<CopyJob*>* cp_jobs;
+
+unordered_set<CopyJob*>* cp_jobs;
 vector<io_uring_cqe*>* pending_cqes;
 unordered_set<string>* created_dest_dirs;
 RegFDAllocator* fd_alloc;
@@ -406,7 +406,7 @@ void process_getdents(io_uring_cqe *cqe) {
                 // TODO: Compute the dest dirpath instead.
                 // Sets the state to FSTAT_PENDING
                 CopyJob *job = new CopyJob(src_path, dst_path);
-                cp_jobs->push(job);
+                cp_jobs->insert(job);
             } 
             else if (dent->d_type == DT_DIR) {
                 process_dir(src_path, dst_path);
@@ -654,16 +654,14 @@ void do_copy_fstat(CopyJob* job) {
 }
 
 bool process_copy_jobs() {
-    CopyJob* job;
+    CopyJob* job_ptr;
     cout << "Processing copy_jobs: " << cp_jobs->size() << endl;
 
     bool submitted = false;
 
-    // TODO: We should pipeline this by processing all elements.
-    while(cp_jobs->size() > 0) {
-        bool break_outer = true;
-        job = cp_jobs->front();
+    vector<CopyJob*> to_delete;
 
+    for(const auto& job: *cp_jobs) {
         if(created_dest_dirs->find(job->get_dst_dir()) == created_dest_dirs->end()) {
             // parent dir not present so skip.
             break;
@@ -685,17 +683,18 @@ bool process_copy_jobs() {
             break;
         case COPY_CP_DONE:
             cout << "Processing job in CP_DONE state "<< endl;
-            cp_jobs->pop();
+            to_delete.push_back(job);
             fd_alloc->release(job->get_dst_fd());
             fd_alloc->release(job->get_src_fd());
-            break_outer = false;
             break;
         default:
             cout << "Copy Job in invalid state " << job->get_state() << " Crashing" << endl;
             exit(1);
         }
-        if(break_outer)
-            break;
+    }
+
+    for(const auto& job: to_delete) {
+        cp_jobs->erase(job);
     }
     return submitted;
 }
@@ -705,7 +704,7 @@ int main() {
     int files[REG_FD_SIZE];
     struct io_uring_cqe *cqe;
 
-    cp_jobs = new queue<CopyJob*>();
+    cp_jobs = new unordered_set<CopyJob*>();
     pending_cqes = new vector<io_uring_cqe*>();
     created_dest_dirs = new unordered_set<string>();
     fd_alloc = new RegFDAllocator(REG_FD_SIZE);
