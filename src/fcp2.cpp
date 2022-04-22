@@ -39,8 +39,7 @@ using std::filesystem::path;
 #define IOSQE_CQE_SKIP_SUCCESS	(1U << IOSQE_CQE_SKIP_SUCCESS_BIT)
 
 #define RINGSIZE 1024
-#define R_FILE_SIZE 100
-#define REG_FD_SIZE 256
+#define REG_FD_SIZE 1024
 #define IORING_OP_GETDENTS64 41
 #define DIR_BUF_SIZE 16384
 
@@ -112,6 +111,8 @@ public:
                 return i;
             }
         }
+        cerr << "Failed to get a free filedescriptor, crashing " << endl;
+        exit(1);
         return -1;
     }
 
@@ -128,6 +129,7 @@ public:
 // src, dst, dst_dir // TODO: Probably compute dst_dir
 // typedef array<string, 3> copyjob;
 
+// States for copy job
 // COPY_STAT_PENDING -> COPY_STAT_SUBMITTED, COPY_STAT_DONE -> COPY_CP_IN_PROGRESS -> COPY_CP_DONE
 enum {
     COPY_STAT_PENDING,
@@ -700,7 +702,7 @@ bool process_copy_jobs() {
 
 int main() {
     int ret;
-    int files[R_FILE_SIZE];
+    int files[REG_FD_SIZE];
     struct io_uring_cqe *cqe;
 
     cp_jobs = new queue<CopyJob*>();
@@ -722,7 +724,7 @@ int main() {
     string dst_dir = "/home/ubuntu/project/aos_project/dst_dir";
 
     created_dest_dirs->insert("/home/ubuntu/project/aos_project");
-    process_dir("/home/ubuntu/project/aos_project/build", "/home/ubuntu/project/aos_project/dst_dir");
+    process_dir("/home/ubuntu/linux-block", "/home/ubuntu/project/aos_project/dst_dir");
 
     struct __kernel_timespec ts;
     ts.tv_nsec = 0;
