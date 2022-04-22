@@ -149,6 +149,8 @@ private:
     // file index
     int src_fd;
     int dst_fd;
+    bool src_opened;
+    bool dst_opened;
 public:
     CopyJob(string src, string dst) {
         this->src = path(src);
@@ -158,6 +160,24 @@ public:
         this->n_bytes_copied = 0;
         this->size = -1;
         this->state = COPY_STAT_PENDING;
+        this->src_opened = false;
+        this->dst_opened = false;
+    }
+
+    bool is_dst_opened() {
+        return this->dst_opened;
+    }
+
+    bool is_src_opened() {
+        return this->src_opened;
+    }
+
+    void set_src_opened() {
+        this->src_opened = true;
+    }
+
+    void set_dst_opened() {
+        this->dst_opened = true;
     }
 
     void set_src_fd(int fd) {
@@ -448,26 +468,46 @@ int process_cqe(io_uring_cqe *cqe) {
         // return 1;
     } else if (meta->type == FCP_OP_WRITE) {
         if(cqe->res < 0) {
-            CopyJob *cp_job = (CopyJob *) cqe->user_data;
-            cerr << "GOT CQE! A write operation failed: " << strerror(-cqe->res) << " " << cp_job << endl;
+            cerr << "GOT CQE! A write operation failed: " << strerror(-cqe->res) << endl;
             exit(1);
         } else {
             cout << "GOT CQE! A write operation completed: " << cqe->res << endl;
             process_write_completion(meta->cp_job);
         }
-    } else if (meta->type == FCP_OP_CREATFILE) {
-        if(cqe->res < 0) {
-            cerr << "A create file operation failed: " << strerror(-cqe->res) << endl;
-            exit(1);
-        } else {
-            cout << "GOT CQE! A create file operation completed: " << cqe->res << endl;
-        }
-    } else if (meta->type == FCP_OP_STAT_COPY_JOB) {
+    } 
+    // else if (meta->type == FCP_OP_CREATFILE) {
+    //     if(cqe->res < 0) {
+    //         cerr << "A create file operation failed: " << strerror(-cqe->res) << endl;
+    //         exit(1);
+    //     } else {
+    //         cout << "GOT CQE! A create file operation completed: " << cqe->res << endl;
+    //     }
+    // } 
+    else if (meta->type == FCP_OP_STAT_COPY_JOB) {
         if(cqe->res < 0) {
             cerr << "A stat operation for copy job failed: " << strerror(-cqe->res) << endl;
+            exit(1);
         } else {
             cout << "GOT CQE! A stat operation for copy job completed: " << cqe->res << endl;
             process_stat_copy_job(cqe);
+        }
+    } else if (meta->type == FCP_OP_OPENFILE) {
+        if(cqe->res < 0) {
+            cerr << "An openfile operation for copy job failed: " << strerror(-cqe->res) << endl;
+            exit(1);
+        } else {
+            RequestMeta *meta = (RequestMeta *)cqe->user_data;
+            meta->cp_job->set_dst_opened();
+            cout << "GOT CQE! An openfile operation for copyjob of file " << meta->cp_job->get_dst_path() << " has completed: " << cqe->res  << endl;
+        }
+    } else if (meta->type == FCP_OP_CREATFILE) {
+        if(cqe->res < 0) {
+            cerr << "A create file operation for copy job failed: " << strerror(-cqe->res) << endl;
+            exit(1);
+        } else {
+            RequestMeta *meta = (RequestMeta *)cqe->user_data;
+            meta->cp_job->set_src_opened();
+            cout << "GOT CQE! A create file operation for file " << meta->cp_job->get_dst_path() << " for copyjob has completed: " << cqe->res << endl;
         }
     } else {
         assert(0);
@@ -491,8 +531,9 @@ void _prep_copy_opens(CopyJob* job) {
     // TODO: Add fadvise if needed
     io_uring_prep_openat_direct(sqe, -1, job->get_src_path().c_str(), O_RDONLY, 0, src_reg_fd);
     sqe->flags = IOSQE_IO_LINK;
-    sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+    // sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     meta = new RequestMeta(FCP_OP_OPENFILE);
+    meta->cp_job = job;
     io_uring_sqe_set_data(sqe, (void *)meta);
 
     // ***** END: Open src dir *****
@@ -504,8 +545,9 @@ void _prep_copy_opens(CopyJob* job) {
     // TODO: Fix permissions
     io_uring_prep_openat_direct(sqe, -1, job->get_dst_path().c_str(), O_CREAT | O_WRONLY, 0777, dst_reg_fd);
     sqe->flags = IOSQE_IO_LINK;
-    sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+    // sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     meta = new RequestMeta(FCP_OP_CREATFILE);
+    meta->cp_job = job;
     io_uring_sqe_set_data(sqe, (void *) meta);
     // ***** END: Open/Create dst dir *****
 
@@ -514,14 +556,14 @@ void _prep_copy_opens(CopyJob* job) {
 }
 
 // TODO: This can be further asynchronized/pipelined.
-void do_file_copy(CopyJob* job) {
+// return if submitted new operation
+bool do_file_copy(CopyJob* job) {
     struct io_uring_sqe *sqe;
     RequestMeta *meta;
 
-    ssize_t max_buf_size = 4096;
+    ssize_t max_buf_size = 1024;
     ssize_t bytes_to_copy = job->get_size() - job->get_bytes_copied();
     bytes_to_copy = max_buf_size < bytes_to_copy ? max_buf_size : bytes_to_copy;
-    cout << "bytes_to_copy = " << bytes_to_copy << " for file " << job->get_dst_path() << endl;
 
     // finished copying the file
     if(job->get_size() > 0 && bytes_to_copy == 0 ) {
@@ -530,7 +572,7 @@ void do_file_copy(CopyJob* job) {
             assert(0);
             // job->set_state(COPY_CP_DONE);
         }
-        return;
+        return false;
     }
 
     // TODO: Fix memory leak.
@@ -540,17 +582,25 @@ void do_file_copy(CopyJob* job) {
     // Submission chain.
     // open(src) -> open(dst) -> read(src) -> write(src) or read(src) -> write(src)
 
-    if(job->get_bytes_copied() == 0 || true) {
+    if(job->get_bytes_copied() == 0) {
         // This means that this is the first write operation so we need to do open as well.
         _prep_copy_opens(job);
+    } else {
+        // If the file creation/openings have not completed, then do nothing.
+        if(!job->is_dst_opened() || !job->is_src_opened()) {
+            cout << "DOING NOTHING: " << job->get_dst_path() << endl;
+            return false;
+        }
     }
+
+    cout << "bytes_to_copy = " << bytes_to_copy << " for file " << job->get_dst_path() << endl;
 
     // ***** BEGIN: Read src file *****
     sqe = io_uring_get_sqe(&ring);
     assert(sqe != NULL);
 
     cout << "src_reg_fd = " << job->get_src_fd() << endl;
-    io_uring_prep_read(sqe, job->get_src_fd(), buf, bytes_to_copy, 0);
+    io_uring_prep_read(sqe, job->get_src_fd(), buf, bytes_to_copy, job->get_bytes_copied());
     sqe->flags = IOSQE_FIXED_FILE;
     // hardlink won't fail for partial reads.
     sqe->flags |= IOSQE_IO_LINK;
@@ -566,7 +616,7 @@ void do_file_copy(CopyJob* job) {
     // TODO: Use file size for deterministic copy size.
     // TODO: Skip success CQE unless it is the last write
     cout << "dst_reg_fd = " << job->get_dst_fd() << endl;
-    io_uring_prep_write(sqe, job->get_dst_fd(), buf, bytes_to_copy, 0);
+    io_uring_prep_write(sqe, job->get_dst_fd(), buf, bytes_to_copy, job->get_bytes_copied());
     sqe->flags = IOSQE_FIXED_FILE;
     meta = new RequestMeta(FCP_OP_WRITE);
     meta->cp_job = job;
@@ -578,6 +628,7 @@ void do_file_copy(CopyJob* job) {
     job->add_bytes_copied(bytes_to_copy);
 
     io_uring_submit(&ring);
+    return true;
 }
 
 void do_copy_fstat(CopyJob* job) {
@@ -600,9 +651,11 @@ void do_copy_fstat(CopyJob* job) {
     cout << "Submitted stat operation for " << job->get_dst_path() << endl;
 }
 
-void process_copy_jobs() {
+bool process_copy_jobs() {
     CopyJob* job;
     cout << "Processing copy_jobs: " << cp_jobs->size() << endl;
+
+    bool submitted = false;
 
     // TODO: We should pipeline this by processing all elements.
     while(cp_jobs->size() > 0) {
@@ -618,13 +671,15 @@ void process_copy_jobs() {
         case COPY_STAT_PENDING:
             cout << "Processing job in STAT_PENDING state "<< endl;
             do_copy_fstat(job);
+            submitted = true;
             break;
         case COPY_STAT_SUBMITTED:
             break;
         case COPY_STAT_DONE:
         case COPY_CP_IN_PROGRESS:
-            cout << "Processing job in STAT_DONE/CP_IN_PROGRESS state: " << job << endl;
-            do_file_copy(job);
+            cout << "Processing job in STAT_DONE/CP_IN_PROGRESS " << endl;
+            if(do_file_copy(job))
+                submitted = true;
             break;
         case COPY_CP_DONE:
             cout << "Processing job in CP_DONE state "<< endl;
@@ -640,6 +695,7 @@ void process_copy_jobs() {
         if(break_outer)
             break;
     }
+    return submitted;
 }
 
 int main() {
