@@ -629,6 +629,8 @@ void process_copy_jobs() {
         case COPY_CP_DONE:
             cout << "Processing job in CP_DONE state "<< endl;
             cp_jobs->pop();
+            fd_alloc->release(job->get_dst_fd());
+            fd_alloc->release(job->get_src_fd());
             break_outer = false;
             break;
         default:
@@ -692,7 +694,7 @@ int main() {
                 sync();
                 exit(0);
             }
-            // exit(1);
+            exit(1);
         }
         ret = process_cqe(cqe);
         if(ret == 0) {
