@@ -40,7 +40,7 @@ using std::filesystem::path;
 
 #define RINGSIZE 1024
 #define R_FILE_SIZE 100
-#define REG_FD_SIZE 128
+#define REG_FD_SIZE 4000
 #define IORING_OP_GETDENTS64 41
 #define DIR_BUF_SIZE 16384
 
@@ -448,8 +448,8 @@ int process_cqe(io_uring_cqe *cqe) {
         // return 1;
     } else if (meta->type == FCP_OP_WRITE) {
         if(cqe->res < 0) {
-            cerr << "GOT CQE! A write operation failed: " << strerror(-cqe->res) 
-                << ((CopyJob *)cqe->user_data)->get_dst_dir() << endl;
+            CopyJob *cp_job = (CopyJob *) cqe->user_data;
+            cerr << "GOT CQE! A write operation failed: " << strerror(-cqe->res) << " " << cp_job << endl;
             exit(1);
         } else {
             cout << "GOT CQE! A write operation completed: " << cqe->res << endl;
@@ -469,6 +469,8 @@ int process_cqe(io_uring_cqe *cqe) {
             cout << "GOT CQE! A stat operation for copy job completed: " << cqe->res << endl;
             process_stat_copy_job(cqe);
         }
+    } else {
+        assert(0);
     }
 
     return 0;
@@ -480,8 +482,6 @@ void _prep_copy_opens(CopyJob* job) {
 
     int dst_reg_fd = fd_alloc->get_free();
     int src_reg_fd = fd_alloc->get_free();
-    cout << "src_reg_fd = " << src_reg_fd << endl;
-    cout << "dst_reg_fd = " << dst_reg_fd << endl;
 
     // ***** BEGIN: Open src dir *****
     //
@@ -524,10 +524,12 @@ void do_file_copy(CopyJob* job) {
     cout << "bytes_to_copy = " << bytes_to_copy << " for file " << job->get_dst_path() << endl;
 
     // finished copying the file
-    if(job->get_size() > 0 && bytes_to_copy == 0) {
-        cout << "Error: " << job->get_dst_path() << endl;
-        // assert(0);
-        job->set_state(COPY_CP_DONE);
+    if(job->get_size() > 0 && bytes_to_copy == 0 ) {
+        if(job->get_state() == COPY_CP_DONE) {
+            cout << "Error: " << job->get_dst_path() << endl;
+            assert(0);
+            // job->set_state(COPY_CP_DONE);
+        }
         return;
     }
 
@@ -538,7 +540,7 @@ void do_file_copy(CopyJob* job) {
     // Submission chain.
     // open(src) -> open(dst) -> read(src) -> write(src) or read(src) -> write(src)
 
-    if(job->get_bytes_copied() == 0) {
+    if(job->get_bytes_copied() == 0 || true) {
         // This means that this is the first write operation so we need to do open as well.
         _prep_copy_opens(job);
     }
@@ -547,10 +549,11 @@ void do_file_copy(CopyJob* job) {
     sqe = io_uring_get_sqe(&ring);
     assert(sqe != NULL);
 
+    cout << "src_reg_fd = " << job->get_src_fd() << endl;
     io_uring_prep_read(sqe, job->get_src_fd(), buf, bytes_to_copy, 0);
     sqe->flags = IOSQE_FIXED_FILE;
     // hardlink won't fail for partial reads.
-    sqe->flags |= IOSQE_IO_HARDLINK;
+    sqe->flags |= IOSQE_IO_LINK;
     sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     meta = new RequestMeta(FCP_OP_READ);
     io_uring_sqe_set_data(sqe, (void *)meta);
@@ -562,10 +565,12 @@ void do_file_copy(CopyJob* job) {
 
     // TODO: Use file size for deterministic copy size.
     // TODO: Skip success CQE unless it is the last write
+    cout << "dst_reg_fd = " << job->get_dst_fd() << endl;
     io_uring_prep_write(sqe, job->get_dst_fd(), buf, bytes_to_copy, 0);
     sqe->flags = IOSQE_FIXED_FILE;
     meta = new RequestMeta(FCP_OP_WRITE);
     meta->cp_job = job;
+    cout << "WRITE ISSUE: " << job->get_dst_path() << " " << meta->cp_job << " = " << job  << endl;
     io_uring_sqe_set_data(sqe, (void *)meta);
     // ***** END: Write dst file *****
 
@@ -599,9 +604,15 @@ void process_copy_jobs() {
     CopyJob* job;
     cout << "Processing copy_jobs: " << cp_jobs->size() << endl;
 
+    // TODO: We should pipeline this by processing all elements.
     while(cp_jobs->size() > 0) {
         bool break_outer = true;
         job = cp_jobs->front();
+
+        if(created_dest_dirs->find(job->get_dst_dir()) == created_dest_dirs->end()) {
+            // parent dir not present so skip.
+            break;
+        }
 
         switch(job->get_state()) {
         case COPY_STAT_PENDING:
@@ -612,7 +623,7 @@ void process_copy_jobs() {
             break;
         case COPY_STAT_DONE:
         case COPY_CP_IN_PROGRESS:
-            cout << "Processing job in STAT_DONE/CP_IN_PROGRESS state "<< endl;
+            cout << "Processing job in STAT_DONE/CP_IN_PROGRESS state: " << job << endl;
             do_file_copy(job);
             break;
         case COPY_CP_DONE:
@@ -681,13 +692,13 @@ int main() {
                 sync();
                 exit(0);
             }
-            exit(1);
+            // exit(1);
         }
         ret = process_cqe(cqe);
         if(ret == 0) {
             io_uring_cqe_seen(&ring, cqe);
         }
         process_copy_jobs();
-        process_dir_jobs();
+        // process_dir_jobs();
     }
 }
