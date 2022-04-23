@@ -50,7 +50,7 @@ struct io_uring ring;
 unordered_set<CopyJob*>* cp_jobs;
 vector<io_uring_cqe*>* pending_cqes;
 unordered_set<string>* created_dest_dirs;
-RegFDAllocator* fd_alloc;
+RegFDAllocator<REG_FD_SIZE> fd_alloc;
 unordered_map<string, uint8_t*>* dirent_buf_map;
 
 static inline void io_uring_prep_getdents64(struct io_uring_sqe *sqe, int fd,
@@ -87,7 +87,7 @@ int prep_readdir(string dirpath, uint8_t* dirbuf, string dst_path) {
     struct io_uring_sqe *sqe;
     RequestMeta *meta = new RequestMeta(FCP_OP_GETDENTS);
     // Store the regfd that was used for the open.
-    meta->reg_fd = fd_alloc->get_free();
+    meta->reg_fd = fd_alloc.get_free();
 
     // Get sqe
     sqe = io_uring_get_sqe(&ring);
@@ -151,6 +151,7 @@ void process_dir(string src_path, string dst_path) {
     // assert(ret == num_wait);
 }
 
+
 void process_dir_jobs() {
     vector<string> to_erase;
     for(const auto& dir: dirjobs) {
@@ -211,7 +212,7 @@ void process_getdents(io_uring_cqe *cqe) {
 	}
 
     assert(meta->reg_fd != -1);
-    fd_alloc->release(meta->reg_fd);
+    fd_alloc.release(meta->reg_fd);
 }
 
 void process_stat_copy_job(struct io_uring_cqe *cqe) {
@@ -317,8 +318,8 @@ void _prep_copy_opens(CopyJob* job) {
     struct io_uring_sqe *sqe;
     RequestMeta *meta;
 
-    int dst_reg_fd = fd_alloc->get_free();
-    int src_reg_fd = fd_alloc->get_free();
+    int dst_reg_fd = fd_alloc.get_free();
+    int src_reg_fd = fd_alloc.get_free();
 
     // ***** BEGIN: Open src dir *****
     //
@@ -479,8 +480,8 @@ bool process_copy_jobs() {
         case COPY_CP_DONE:
             cout << "Processing job in CP_DONE state "<< endl;
             to_delete.push_back(job);
-            fd_alloc->release(job->get_dst_fd());
-            fd_alloc->release(job->get_src_fd());
+            fd_alloc.release(job->get_dst_fd());
+            fd_alloc.release(job->get_src_fd());
             break;
         default:
             cout << "Copy Job in invalid state " << job->get_state() << " Crashing" << endl;
@@ -502,13 +503,12 @@ int main() {
     cp_jobs = new unordered_set<CopyJob*>();
     pending_cqes = new vector<io_uring_cqe*>();
     created_dest_dirs = new unordered_set<string>();
-    fd_alloc = new RegFDAllocator(REG_FD_SIZE);
     dirent_buf_map = new unordered_map<string, uint8_t*>();
 
     ret = io_uring_queue_init(RINGSIZE, &ring, 0);
     assert(ret == 0);
 
-    ret = io_uring_register_files(&ring, fd_alloc->fd_list, fd_alloc->get_size());
+    ret = io_uring_register_files(&ring, fd_alloc.fd_list.data(), fd_alloc.get_size());
     if(ret != 0) {
         cerr << "Failed to register files: " << strerror(-ret) << endl;
         exit(1);

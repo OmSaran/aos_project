@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #define RINGSIZE 1024
 #define REG_FD_SIZE 1024
@@ -163,30 +164,27 @@ public:
 };
 
 // TODO: There's probably a better allocator for this
+template <int N>
 class RegFDAllocator {
 private:
-    int size;
-    std::unordered_set<int> busy_list;
+    std::vector<bool> busy_list;
 public:
-    int *fd_list;
+    std::vector<int> fd_list;
     // TODO: Write destructor.
-    RegFDAllocator(int size) {
-        this->size = size;
-        fd_list = (int *)malloc(size * sizeof(int));
-        for(int i=0; i<size; i++) {
-            fd_list[i] = -1;
-        }
+    RegFDAllocator() {
+        busy_list.resize(N, false);
+        fd_list.resize(N, -1);
     }
 
     int get_size() {
-        return size;
+        return N;
     }
 
     // Returns -1 if full
     int get_free() {
-        for(int i=0; i<size; i++) {
-            if(busy_list.find(i) == busy_list.end()) {
-                busy_list.insert(i);
+        for(int i=0; i<N; i++) {
+            if(!busy_list[i]) {
+                busy_list[i] = true;
                 return i;
             }
         }
@@ -196,9 +194,8 @@ public:
     }
 
     int release(int idx) {
-        int ret;
-        ret = busy_list.erase(idx);
-        assert(ret == 1);
+        assert(busy_list[idx]);
+        busy_list[idx] = false;
 
         return 0;
     }
