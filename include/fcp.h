@@ -54,9 +54,9 @@ class CopyJob;
 class RequestMeta {
 public:
     // TODO: Define getter/setter
-    std::string dirpath;
+    std::filesystem::path dirpath;
     // to be used by readdir TODO: need better abstractions
-    std::string dest_dirpath;
+    std::filesystem::path dest_dirpath;
     int type;
     int reg_fd;
     CopyJob* cp_job;

@@ -59,8 +59,9 @@ static inline void io_uring_prep_getdents64(struct io_uring_sqe *sqe, int fd,
 	io_uring_prep_rw(IORING_OP_GETDENTS64, sqe, fd, buf, count, 0);
 }
 
-int prep_mkdir(string dst_path) {
+int prep_mkdir(const filesystem::path& dst_path) {
     struct io_uring_sqe *sqe;
+    //! FIXME: Allocating memory for every mkdir can't be good; do something better
     RequestMeta *meta = new RequestMeta(FCP_OP_MKDIR);
     meta->dirpath = dst_path;
 
@@ -83,8 +84,10 @@ int prep_mkdir(string dst_path) {
 }
 
 // Return number of requests queued
-int prep_readdir(string dirpath, std::vector<linux_dirent64>& dirbuf, string dst_path) {
+int prep_readdir(const filesystem::path& dirpath, std::vector<linux_dirent64>& dirbuf, const filesystem::path& dst_path) {
     struct io_uring_sqe *sqe;
+
+    //! FIXME: mem alloc for every dir read can't be good :(
     RequestMeta *meta = new RequestMeta(FCP_OP_GETDENTS);
     // Store the regfd that was used for the open.
     meta->reg_fd = fd_alloc.get_free();
@@ -93,8 +96,8 @@ int prep_readdir(string dirpath, std::vector<linux_dirent64>& dirbuf, string dst
     sqe = io_uring_get_sqe(&ring);
     assert(sqe != NULL);
 
-    // TODO: Fix memory leak
-    string *sqe_dirname = new string(dirpath);
+    //! FIXME: Fix memory leak / mem alloc for every dirpath can't be good
+    string *sqe_dirname = new string(dirpath.string());
 
     // Prepare open request
     // TODO: We don't want to open it again for subsequent writes.
@@ -109,6 +112,8 @@ int prep_readdir(string dirpath, std::vector<linux_dirent64>& dirbuf, string dst
     // Prepare getdents request
     // TODO: Do this in loop.
     io_uring_prep_getdents64(sqe, meta->reg_fd, &dirbuf[0], DIR_BUF_SIZE);
+
+    //! FIXME: Copying strings/path is never good, use a hash/id of the entire job, and keep a job set
     meta->dirpath = dirpath;
     meta->dest_dirpath = dst_path;
     io_uring_sqe_set_data(sqe, (void *)meta);
@@ -118,28 +123,29 @@ int prep_readdir(string dirpath, std::vector<linux_dirent64>& dirbuf, string dst
     return 2;
 }
 
-void process_dir(string src_path, string dst_path) {
+void process_dir(const filesystem::path& src_path, const filesystem::path& dst) {
     struct io_uring_cqe *cqe;
     int num_wait = 0;
     int ret;
 
-    filesystem::path dst(dst_path);
+    // filesystem::path dst(dst_path);
 
     // bool need_submission = false;
     
-    if(created_dest_dirs.find(dst.parent_path()) != created_dest_dirs.end()) {
+    if(created_dest_dirs.find(dst.parent_path().string()) != created_dest_dirs.end()) {
         // Prepare mkdir request
-        num_wait += prep_mkdir(dst_path);
+        num_wait += prep_mkdir(dst);
         // need_submission = true;
     } else {
-        dirjobs.insert(dst_path);
+        //! FIXME: Way too much string passing, use id/hash
+        dirjobs.insert(dst.string());
     }
 
-    dirent_buf_map[src_path].resize(MAX_DIR_ENT);
+    dirent_buf_map[src_path.string()].resize(MAX_DIR_ENT);
 
     // if(submitted_readdirs.find(src_path) == submitted_readdirs.end()) {
         // Prepare readdir request
-        num_wait += prep_readdir(src_path, dirent_buf_map[src_path], dst_path);
+        num_wait += prep_readdir(src_path, dirent_buf_map[src_path.string()], dst);
         // need_submission = true;
     // }
 
@@ -172,7 +178,7 @@ void process_dir_jobs() {
     } 
 }
 
-void process_getdents(io_uring_cqe *cqe) {
+void process_getdents(const io_uring_cqe *cqe) {
     // Read the direntry list and then add to the cpjobs
     // copyjob* job = new copyjob(src, dst, dst_dir_path)
     assert(cqe->res >= 0);
@@ -212,7 +218,7 @@ void process_getdents(io_uring_cqe *cqe) {
     fd_alloc.release(meta->reg_fd);
 }
 
-void process_stat_copy_job(struct io_uring_cqe *cqe) {
+void process_stat_copy_job(const io_uring_cqe *cqe) {
     RequestMeta *meta = (RequestMeta *) cqe->user_data;
     meta->cp_job->set_size(meta->statbuf->stx_size);
     cout << "Setting the state to COPY_STAT_DONE for file " << meta->cp_job->get_dst_path() << endl;
@@ -230,82 +236,90 @@ void process_write_completion(CopyJob *job) {
 /**
  * Process the current cqe //and re-process the rest 
  */
-int process_cqe(io_uring_cqe *cqe) {
+int process_cqe(const io_uring_cqe *cqe) {
     RequestMeta *meta;
     meta = (RequestMeta *)cqe->user_data;
 
     // TODO: P1: Handle other types
-    if(meta->type == FCP_OP_MKDIR) {
-        cout << "GOT CQE! Processing a mkdir operation" << endl;
-        if(cqe->res < 0) {
-            cerr << "Mkdir at " << meta->dirpath << " operation failed: " << strerror(-cqe->res) << endl;
-            exit(1);
+    switch(meta->type)
+    {
+        case FCP_OP_MKDIR: {
+            cout << "GOT CQE! Processing a mkdir operation" << endl;
+            if(cqe->res < 0) {
+                cerr << "Mkdir at " << meta->dirpath << " operation failed: " << strerror(-cqe->res) << endl;
+                exit(1);
+            }
+            created_dest_dirs.insert(meta->dirpath);
+            break;
         }
-        created_dest_dirs.insert(meta->dirpath);
-    } else if (meta->type == FCP_OP_GETDENTS) {
-        cout << "GOT CQE! Processing a getdents operation" << endl;
-        if(cqe->res < 0) {
-            cerr << "Getdents operation failed: " << strerror(-cqe->res) << endl;
-            exit(1);
+        case FCP_OP_GETDENTS: {
+            cout << "GOT CQE! Processing a getdents operation" << endl;
+            if(cqe->res < 0) {
+                cerr << "Getdents operation failed: " << strerror(-cqe->res) << endl;
+                exit(1);
+            }
+            process_getdents(cqe);
+            break;
         }
-        process_getdents(cqe);
-    } else if (meta->type == FCP_OP_OPENDIR) {
-        // TODO: 
-        cerr << "FCP_OP_OPENDIR not handled" << endl;
-        exit(1);
-    } else if (meta->type == FCP_OP_READ) {
-        if(cqe->res < 0) {
-            cerr << "GOT CQE! A read operation failed: " << strerror(-cqe->res) << endl;
+        case FCP_OP_OPENDIR: {
+            // TODO: 
+            cerr << "FCP_OP_OPENDIR not handled" << endl;
             exit(1);
-        } else {
-            cout << "GOT CQE! A read operation completed: " << cqe->res << endl;
+            break;
         }
-        // return 1;
-    } else if (meta->type == FCP_OP_WRITE) {
-        if(cqe->res < 0) {
-            cerr << "GOT CQE! A write operation failed: " << strerror(-cqe->res) << endl;
-            exit(1);
-        } else {
-            cout << "GOT CQE! A write operation completed: " << cqe->res << endl;
-            process_write_completion(meta->cp_job);
+        case FCP_OP_READ: {
+             if(cqe->res < 0) {
+                cerr << "GOT CQE! A read operation failed: " << strerror(-cqe->res) << endl;
+                exit(1);
+            } else {
+                cout << "GOT CQE! A read operation completed: " << cqe->res << endl;
+            }
+            // return 1;
+            break;
         }
-    } 
-    // else if (meta->type == FCP_OP_CREATFILE) {
-    //     if(cqe->res < 0) {
-    //         cerr << "A create file operation failed: " << strerror(-cqe->res) << endl;
-    //         exit(1);
-    //     } else {
-    //         cout << "GOT CQE! A create file operation completed: " << cqe->res << endl;
-    //     }
-    // } 
-    else if (meta->type == FCP_OP_STAT_COPY_JOB) {
-        if(cqe->res < 0) {
-            cerr << "A stat operation for copy job failed: " << strerror(-cqe->res) << endl;
-            exit(1);
-        } else {
-            cout << "GOT CQE! A stat operation for copy job completed: " << cqe->res << endl;
-            process_stat_copy_job(cqe);
+        case FCP_OP_WRITE: {
+            if(cqe->res < 0) {
+                cerr << "GOT CQE! A write operation failed: " << strerror(-cqe->res) << endl;
+                exit(1);
+            } else {
+                cout << "GOT CQE! A write operation completed: " << cqe->res << endl;
+                process_write_completion(meta->cp_job);
+            }
+            break;
         }
-    } else if (meta->type == FCP_OP_OPENFILE) {
-        if(cqe->res < 0) {
-            cerr << "An openfile operation for copy job failed: " << strerror(-cqe->res) << endl;
-            exit(1);
-        } else {
-            RequestMeta *meta = (RequestMeta *)cqe->user_data;
-            meta->cp_job->set_dst_opened();
-            cout << "GOT CQE! An openfile operation for copyjob of file " << meta->cp_job->get_dst_path() << " has completed: " << cqe->res  << endl;
+        case FCP_OP_CREATFILE: {
+            if(cqe->res < 0) {
+                cerr << "A create file operation for copy job failed: " << strerror(-cqe->res) << endl;
+                exit(1);
+            } else {
+                RequestMeta *meta = (RequestMeta *)cqe->user_data;
+                meta->cp_job->set_src_opened();
+                cout << "GOT CQE! A create file operation for file " << meta->cp_job->get_dst_path() << " for copyjob has completed: " << cqe->res << endl;
+            }
+            break;
         }
-    } else if (meta->type == FCP_OP_CREATFILE) {
-        if(cqe->res < 0) {
-            cerr << "A create file operation for copy job failed: " << strerror(-cqe->res) << endl;
-            exit(1);
-        } else {
-            RequestMeta *meta = (RequestMeta *)cqe->user_data;
-            meta->cp_job->set_src_opened();
-            cout << "GOT CQE! A create file operation for file " << meta->cp_job->get_dst_path() << " for copyjob has completed: " << cqe->res << endl;
+        case FCP_OP_STAT_COPY_JOB: {
+            if(cqe->res < 0) {
+                cerr << "A stat operation for copy job failed: " << strerror(-cqe->res) << endl;
+                exit(1);
+            } else {
+                cout << "GOT CQE! A stat operation for copy job completed: " << cqe->res << endl;
+                process_stat_copy_job(cqe);
+            }
+            break;
         }
-    } else {
-        assert(0);
+        case FCP_OP_OPENFILE: {
+            if(cqe->res < 0) {
+                cerr << "An openfile operation for copy job failed: " << strerror(-cqe->res) << endl;
+                exit(1);
+            } else {
+                RequestMeta *meta = (RequestMeta *)cqe->user_data;
+                meta->cp_job->set_dst_opened();
+                cout << "GOT CQE! An openfile operation for copyjob of file " << meta->cp_job->get_dst_path() << " has completed: " << cqe->res  << endl;
+            }
+            break;
+        }
+        default: assert(false);
     }
 
     return 0;
@@ -503,16 +517,20 @@ int main() {
     // dirent_buf_map = new unordered_map<string, uint8_t*>();
 
     ret = io_uring_queue_init(RINGSIZE, &ring, 0);
-    assert(ret == 0);
+    if (ret != 0)
+    {
+        cerr << "Failed to init io_uring queue " << strerror(-ret) << endl;
+        return 1;
+    }
 
     ret = io_uring_register_files(&ring, fd_alloc.fd_list.data(), fd_alloc.get_size());
     if(ret != 0) {
         cerr << "Failed to register files: " << strerror(-ret) << endl;
-        exit(1);
+        return 1;
     }
 
-    string src_dir = "/home/ubuntu/project/aos_project/src_dir";
-    string dst_dir = "/home/ubuntu/project/aos_project/dst_dir";
+    const filesystem::path src_dir("/home/ubuntu/project/aos_project/src_dir");
+    const filesystem::path dst_dir("/home/ubuntu/project/aos_project/dst_dir");
 
     created_dest_dirs.insert("/home/ubuntu/project/aos_project");
     process_dir("/home/ubuntu/project/aos_project/build", "/home/ubuntu/project/aos_project/dst_dir");
