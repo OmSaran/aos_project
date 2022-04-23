@@ -47,11 +47,11 @@ unordered_set<string> submitted_readdirs;
 // Data structures
 struct io_uring ring;
 
-unordered_set<CopyJob*>* cp_jobs;
-vector<io_uring_cqe*>* pending_cqes;
-unordered_set<string>* created_dest_dirs;
+unordered_set<CopyJob*> cp_jobs;
+vector<io_uring_cqe*> pending_cqes;
+unordered_set<string> created_dest_dirs;
 RegFDAllocator<REG_FD_SIZE> fd_alloc;
-unordered_map<string, uint8_t*>* dirent_buf_map;
+unordered_map<string, std::vector<linux_dirent64>> dirent_buf_map;
 
 static inline void io_uring_prep_getdents64(struct io_uring_sqe *sqe, int fd,
 					    void *buf, unsigned int count)
@@ -83,7 +83,7 @@ int prep_mkdir(string dst_path) {
 }
 
 // Return number of requests queued
-int prep_readdir(string dirpath, uint8_t* dirbuf, string dst_path) {
+int prep_readdir(string dirpath, std::vector<linux_dirent64>& dirbuf, string dst_path) {
     struct io_uring_sqe *sqe;
     RequestMeta *meta = new RequestMeta(FCP_OP_GETDENTS);
     // Store the regfd that was used for the open.
@@ -108,7 +108,7 @@ int prep_readdir(string dirpath, uint8_t* dirbuf, string dst_path) {
 
     // Prepare getdents request
     // TODO: Do this in loop.
-    io_uring_prep_getdents64(sqe, meta->reg_fd, dirbuf, DIR_BUF_SIZE);
+    io_uring_prep_getdents64(sqe, meta->reg_fd, &dirbuf[0], DIR_BUF_SIZE);
     meta->dirpath = dirpath;
     meta->dest_dirpath = dst_path;
     io_uring_sqe_set_data(sqe, (void *)meta);
@@ -127,7 +127,7 @@ void process_dir(string src_path, string dst_path) {
 
     // bool need_submission = false;
     
-    if(created_dest_dirs->find(dst.parent_path()) != created_dest_dirs->end()) {
+    if(created_dest_dirs.find(dst.parent_path()) != created_dest_dirs.end()) {
         // Prepare mkdir request
         num_wait += prep_mkdir(dst_path);
         // need_submission = true;
@@ -135,11 +135,11 @@ void process_dir(string src_path, string dst_path) {
         dirjobs.insert(dst_path);
     }
 
-    (*dirent_buf_map)[src_path] = (uint8_t *)malloc(sizeof(uint8_t) * DIR_BUF_SIZE);
+    dirent_buf_map[src_path].resize(MAX_DIR_ENT);
 
     // if(submitted_readdirs.find(src_path) == submitted_readdirs.end()) {
         // Prepare readdir request
-        num_wait += prep_readdir(src_path, (*dirent_buf_map)[src_path], dst_path);
+        num_wait += prep_readdir(src_path, dirent_buf_map[src_path], dst_path);
         // need_submission = true;
     // }
 
@@ -157,7 +157,7 @@ void process_dir_jobs() {
     for(const auto& dir: dirjobs) {
         filesystem::path dst(dir);
 
-        if(created_dest_dirs->find(dst.parent_path()) != created_dest_dirs->end()) {
+        if(created_dest_dirs.find(dst.parent_path()) != created_dest_dirs.end()) {
             // If parent directory has been created, then create the directory
             prep_mkdir(dst);
             io_uring_submit(&ring);
@@ -176,39 +176,36 @@ void process_getdents(io_uring_cqe *cqe) {
     // Read the direntry list and then add to the cpjobs
     // copyjob* job = new copyjob(src, dst, dst_dir_path)
     assert(cqe->res >= 0);
-
-    uint8_t *bufp;
 	uint8_t *end;
     RequestMeta *meta = (RequestMeta *)cqe->user_data;
     filesystem::path src_path, dst_path, dst_dir;
 
-	bufp = (*dirent_buf_map)[meta->dirpath];
-	end = bufp + cqe->res;
+	const auto& dirents = dirent_buf_map[meta->dirpath];
 
-	while (bufp < end) {
-		struct linux_dirent64 *dent;
+    const int num_entries_read = cqe->res / sizeof(linux_dirent64);
 
-		dent = (struct linux_dirent64 *)bufp;
-
-		if (strcmp(dent->d_name, ".") && strcmp(dent->d_name, "..")) {
+    for (int i = 0; i < num_entries_read; i++)
+    {
+        const auto& dent = dirents[i];
+		if (strcmp(dent.d_name, ".") && strcmp(dent.d_name, "..")) 
+        {
 			// Create copy jobs;
             src_path = filesystem::path(meta->dirpath);
-            src_path /= dent->d_name;
+            src_path /= dent.d_name;
             dst_path = filesystem::path(meta->dest_dirpath);
-            dst_path /= dent->d_name;
-            if(dent->d_type == DT_REG) {
+            dst_path /= dent.d_name;
+            if(dent.d_type == DT_REG) {
                 // cout << "dirent: " << dent->d_name << endl;
 
                 // TODO: Compute the dest dirpath instead.
                 // Sets the state to FSTAT_PENDING
                 CopyJob *job = new CopyJob(src_path, dst_path);
-                cp_jobs->insert(job);
+                cp_jobs.insert(job);
             } 
-            else if (dent->d_type == DT_DIR) {
+            else if (dent.d_type == DT_DIR) {
                 process_dir(src_path, dst_path);
             }
 		}
-		bufp += dent->d_reclen;
 	}
 
     assert(meta->reg_fd != -1);
@@ -244,7 +241,7 @@ int process_cqe(io_uring_cqe *cqe) {
             cerr << "Mkdir at " << meta->dirpath << " operation failed: " << strerror(-cqe->res) << endl;
             exit(1);
         }
-        created_dest_dirs->insert(meta->dirpath);
+        created_dest_dirs.insert(meta->dirpath);
     } else if (meta->type == FCP_OP_GETDENTS) {
         cout << "GOT CQE! Processing a getdents operation" << endl;
         if(cqe->res < 0) {
@@ -451,14 +448,14 @@ void do_copy_fstat(CopyJob* job) {
 
 bool process_copy_jobs() {
     CopyJob* job_ptr;
-    cout << "Processing copy_jobs: " << cp_jobs->size() << endl;
+    cout << "Processing copy_jobs: " << cp_jobs.size() << endl;
 
     bool submitted = false;
 
     vector<CopyJob*> to_delete;
 
-    for(const auto& job: *cp_jobs) {
-        if(created_dest_dirs->find(job->get_dst_dir()) == created_dest_dirs->end()) {
+    for(const auto& job: cp_jobs) {
+        if(created_dest_dirs.find(job->get_dst_dir()) == created_dest_dirs.end()) {
             // parent dir not present so skip.
             break;
         }
@@ -490,7 +487,7 @@ bool process_copy_jobs() {
     }
 
     for(const auto& job: to_delete) {
-        cp_jobs->erase(job);
+        cp_jobs.erase(job);
     }
     return submitted;
 }
@@ -500,10 +497,10 @@ int main() {
     int files[REG_FD_SIZE];
     struct io_uring_cqe *cqe;
 
-    cp_jobs = new unordered_set<CopyJob*>();
-    pending_cqes = new vector<io_uring_cqe*>();
-    created_dest_dirs = new unordered_set<string>();
-    dirent_buf_map = new unordered_map<string, uint8_t*>();
+    // cp_jobs = new unordered_set<CopyJob*>();
+    // pending_cqes = new vector<io_uring_cqe*>();
+    // created_dest_dirs = new unordered_set<string>();
+    // dirent_buf_map = new unordered_map<string, uint8_t*>();
 
     ret = io_uring_queue_init(RINGSIZE, &ring, 0);
     assert(ret == 0);
@@ -517,7 +514,7 @@ int main() {
     string src_dir = "/home/ubuntu/project/aos_project/src_dir";
     string dst_dir = "/home/ubuntu/project/aos_project/dst_dir";
 
-    created_dest_dirs->insert("/home/ubuntu/project/aos_project");
+    created_dest_dirs.insert("/home/ubuntu/project/aos_project");
     process_dir("/home/ubuntu/project/aos_project/build", "/home/ubuntu/project/aos_project/dst_dir");
 
     struct __kernel_timespec ts;
@@ -541,7 +538,7 @@ int main() {
         ret = io_uring_wait_cqe_timeout(&ring, &cqe, &ts);
         if(ret != 0) {
             cerr << "Failed to get cqe: " << strerror(-ret) << endl;
-            if(cp_jobs->size() == 0 && dirjobs.size() == 0) {
+            if(cp_jobs.size() == 0 && dirjobs.size() == 0) {
                 cout << "No pending jobs and failed to get cqe, exiting" << endl;
                 // sync();
                 exit(0);

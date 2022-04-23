@@ -11,7 +11,18 @@
 #define RINGSIZE 1024
 #define REG_FD_SIZE 1024
 #define IORING_OP_GETDENTS64 41
+
+
+struct linux_dirent64 {
+	int64_t		d_ino;    /* 64-bit inode number */
+	int64_t		d_off;    /* 64-bit offset to next structure */
+	unsigned short	d_reclen; /* Size of this dirent */
+	unsigned char	d_type;   /* File type */
+	char		d_name[]; /* Filename (null-terminated) */
+};
+
 #define DIR_BUF_SIZE 16384
+#define MAX_DIR_ENT DIR_BUF_SIZE / sizeof(linux_dirent64)
 
 enum {
     FCP_OP_CREATDIR,
@@ -36,13 +47,7 @@ enum {
 };
 
 
-struct linux_dirent64 {
-	int64_t		d_ino;    /* 64-bit inode number */
-	int64_t		d_off;    /* 64-bit offset to next structure */
-	unsigned short	d_reclen; /* Size of this dirent */
-	unsigned char	d_type;   /* File type */
-	char		d_name[]; /* Filename (null-terminated) */
-};
+
 
 class CopyJob;
 
