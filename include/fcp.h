@@ -7,6 +7,9 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <memory>
+#include <liburing.h>
+
 
 #define RINGSIZE 1024
 #define REG_FD_SIZE 1024
@@ -60,7 +63,7 @@ public:
     int type;
     int reg_fd;
     std::shared_ptr<CopyJob> cp_job;
-    struct statx *statbuf;
+    std::unique_ptr<statx> statbuf;
 
     RequestMeta(int type) {
         this->type = type;

@@ -16,7 +16,6 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <memory>
-#include <liburing.h>
 
 using namespace std;
 
@@ -221,8 +220,6 @@ void process_stat_copy_job(const io_uring_cqe *cqe) {
     meta->cp_job->set_size(meta->statbuf->stx_size);
     cout << "Setting the state to COPY_STAT_DONE for file " << meta->cp_job->get_dst_path() << endl;
     meta->cp_job->set_state(COPY_STAT_DONE);
-
-    free(meta->statbuf);
 }
 
 void process_write_completion(const std::shared_ptr<CopyJob>& job) {
@@ -442,16 +439,15 @@ void do_copy_fstat(std::shared_ptr<CopyJob> job) {
     struct io_uring_sqe *sqe;
 
     // TODO: Fix memory leaks
-    struct statx *statbuf = (struct statx *)malloc(sizeof(struct statx));
     RequestMeta *meta = new RequestMeta(FCP_OP_STAT_COPY_JOB);
     meta->cp_job = job;
-    meta->statbuf = statbuf;
+    meta->statbuf = std::make_unique<statx>();
 
     // This means that stat is not done yet.
     sqe = io_uring_get_sqe(&ring);
     assert(sqe != NULL);
 
-    io_uring_prep_statx(sqe, -1, job->get_src_path().c_str(), 0, STATX_SIZE, statbuf);
+    io_uring_prep_statx(sqe, -1, job->get_src_path().c_str(), 0, STATX_SIZE, meta->statbuf.get());
     io_uring_sqe_set_data(sqe, meta);
     io_uring_submit(&ring);
     job->set_state(COPY_STAT_SUBMITTED);
