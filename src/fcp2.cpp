@@ -10,21 +10,14 @@
 #include <cstring>
 #include <filesystem>
 
+#include "fcp.h"
+
 #include <linux/stat.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <liburing.h>
 
-using std::cout;
-using std::cerr;
-using std::endl;
-using std::string;
-using std::vector;
-using std::array;
-using std::queue;
-using std::unordered_set;
-using std::unordered_map;
-using std::filesystem::path;
+using namespace std;
 
 // TODO: P0: File copying done only partially
 // TODO: P0: Call getdents till we see all entries -- done only partially till now.
@@ -38,203 +31,17 @@ using std::filesystem::path;
 #define IOSQE_CQE_SKIP_SUCCESS_BIT 6
 #define IOSQE_CQE_SKIP_SUCCESS	(1U << IOSQE_CQE_SKIP_SUCCESS_BIT)
 
-#define RINGSIZE 1024
-#define REG_FD_SIZE 1024
-#define IORING_OP_GETDENTS64 41
-#define DIR_BUF_SIZE 16384
-
-enum {
-    FCP_OP_CREATDIR,
-    FCP_OP_OPENDIR,
-    FCP_OP_MKDIR,
-    FCP_OP_GETDENTS,
-    FCP_OP_OPENFILE,
-    FCP_OP_READ,
-    FCP_OP_WRITE,
-    FCP_OP_CREATFILE,
-    FCP_OP_STAT_COPY_JOB,
-};
-
 // TODO: Fix memory leaks
 
-class CopyJob;
 
 // TODO P2: Vectors are better
 unordered_set<string> dirjobs;
 // TODO P2: Should find a way without this
 unordered_set<string> submitted_readdirs;
 
-class RequestMeta {
-public:
-    // TODO: Define getter/setter
-    string dirpath;
-    // to be used by readdir TODO: need better abstractions
-    string dest_dirpath;
-    int type;
-    int reg_fd;
-    CopyJob* cp_job;
-    struct statx *statbuf;
-
-    RequestMeta(int type) {
-        this->type = type;
-        this->reg_fd = -1;
-        cp_job = NULL;
-        statbuf = NULL;
-    }
-};
-
-// TODO: There's probably a better allocator for this
-class RegFDAllocator {
-private:
-    int size;
-    unordered_set<int> busy_list;
-public:
-    int *fd_list;
-    // TODO: Write destructor.
-    RegFDAllocator(int size) {
-        this->size = size;
-        fd_list = (int *)malloc(size * sizeof(int));
-        for(int i=0; i<size; i++) {
-            fd_list[i] = -1;
-        }
-    }
-
-    int get_size() {
-        return size;
-    }
-
-    // Returns -1 if full
-    int get_free() {
-        for(int i=0; i<size; i++) {
-            if(busy_list.find(i) == busy_list.end()) {
-                busy_list.insert(i);
-                return i;
-            }
-        }
-        cerr << "Failed to get a free filedescriptor, crashing " << endl;
-        exit(1);
-        return -1;
-    }
-
-    int release(int idx) {
-        int ret;
-        ret = busy_list.erase(idx);
-        assert(ret == 1);
-
-        return 0;
-    }
-};
-
 
 // src, dst, dst_dir // TODO: Probably compute dst_dir
 // typedef array<string, 3> copyjob;
-
-// States for copy job
-// COPY_STAT_PENDING -> COPY_STAT_SUBMITTED, COPY_STAT_DONE -> COPY_CP_IN_PROGRESS -> COPY_CP_DONE
-enum {
-    COPY_STAT_PENDING,
-    COPY_STAT_SUBMITTED,
-    COPY_STAT_DONE,
-    COPY_CP_IN_PROGRESS,
-    COPY_CP_DONE
-};
-
-class CopyJob {
-private:
-    path src;
-    path dst;
-    string src_path;
-    string dst_path;
-    ssize_t size;
-    ssize_t n_bytes_copied;
-    int state;
-    // file index
-    int src_fd;
-    int dst_fd;
-    bool src_opened;
-    bool dst_opened;
-public:
-    CopyJob(string src, string dst) {
-        this->src = path(src);
-        this->dst = path(dst);
-        this->src_path = this->src.string();
-        this->dst_path = this->dst.string();
-        this->n_bytes_copied = 0;
-        this->size = -1;
-        this->state = COPY_STAT_PENDING;
-        this->src_opened = false;
-        this->dst_opened = false;
-    }
-
-    bool is_dst_opened() {
-        return this->dst_opened;
-    }
-
-    bool is_src_opened() {
-        return this->src_opened;
-    }
-
-    void set_src_opened() {
-        this->src_opened = true;
-    }
-
-    void set_dst_opened() {
-        this->dst_opened = true;
-    }
-
-    void set_src_fd(int fd) {
-        this->src_fd = fd;
-    }
-
-    int get_src_fd() {
-        return this->src_fd;
-    }
-
-    void set_dst_fd(int fd) {
-        this->dst_fd = fd;
-    }
-
-    int get_dst_fd() {
-        return this->dst_fd;
-    }
-
-    int get_state() {
-        return this->state;
-    }
-
-    void set_state(int state) {
-        this->state = state;
-    }
-
-    string& get_src_path() {
-        return this->src_path;
-    }
-
-    string& get_dst_path() {
-        return this->dst_path;
-    }
-
-    string get_dst_dir() {
-        return this->dst.parent_path().string();
-    }
-
-    ssize_t get_size() {
-        return this->size;
-    }
-    
-    void set_size(ssize_t size) {
-        cout << "Setting the size " << size << " for the file: " << this->dst_path << endl;
-        this->size = size;
-    }
-
-    ssize_t get_bytes_copied() {
-        return this->n_bytes_copied;
-    }
-    
-    void add_bytes_copied(ssize_t num_bytes) {
-        this->n_bytes_copied += num_bytes;
-    }
-};
 
 
 // Data structures
@@ -245,17 +52,6 @@ vector<io_uring_cqe*>* pending_cqes;
 unordered_set<string>* created_dest_dirs;
 RegFDAllocator* fd_alloc;
 unordered_map<string, uint8_t*>* dirent_buf_map;
-
-
-struct linux_dirent64 {
-	int64_t		d_ino;    /* 64-bit inode number */
-	int64_t		d_off;    /* 64-bit offset to next structure */
-	unsigned short	d_reclen; /* Size of this dirent */
-	unsigned char	d_type;   /* File type */
-	char		d_name[]; /* Filename (null-terminated) */
-};
-
-
 
 static inline void io_uring_prep_getdents64(struct io_uring_sqe *sqe, int fd,
 					    void *buf, unsigned int count)
@@ -327,7 +123,7 @@ void process_dir(string src_path, string dst_path) {
     int num_wait = 0;
     int ret;
 
-    path dst(dst_path);
+    filesystem::path dst(dst_path);
 
     // bool need_submission = false;
     
@@ -355,11 +151,10 @@ void process_dir(string src_path, string dst_path) {
     // assert(ret == num_wait);
 }
 
-
 void process_dir_jobs() {
     vector<string> to_erase;
     for(const auto& dir: dirjobs) {
-        path dst(dir);
+        filesystem::path dst(dir);
 
         if(created_dest_dirs->find(dst.parent_path()) != created_dest_dirs->end()) {
             // If parent directory has been created, then create the directory
@@ -384,7 +179,7 @@ void process_getdents(io_uring_cqe *cqe) {
     uint8_t *bufp;
 	uint8_t *end;
     RequestMeta *meta = (RequestMeta *)cqe->user_data;
-    path src_path, dst_path, dst_dir;
+    filesystem::path src_path, dst_path, dst_dir;
 
 	bufp = (*dirent_buf_map)[meta->dirpath];
 	end = bufp + cqe->res;
@@ -396,9 +191,9 @@ void process_getdents(io_uring_cqe *cqe) {
 
 		if (strcmp(dent->d_name, ".") && strcmp(dent->d_name, "..")) {
 			// Create copy jobs;
-            src_path = path(meta->dirpath);
+            src_path = filesystem::path(meta->dirpath);
             src_path /= dent->d_name;
-            dst_path = path(meta->dest_dirpath);
+            dst_path = filesystem::path(meta->dest_dirpath);
             dst_path /= dent->d_name;
             if(dent->d_type == DT_REG) {
                 // cout << "dirent: " << dent->d_name << endl;
@@ -748,7 +543,7 @@ int main() {
             cerr << "Failed to get cqe: " << strerror(-ret) << endl;
             if(cp_jobs->size() == 0 && dirjobs.size() == 0) {
                 cout << "No pending jobs and failed to get cqe, exiting" << endl;
-                sync();
+                // sync();
                 exit(0);
             }
             exit(1);
