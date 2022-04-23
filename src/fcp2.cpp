@@ -15,6 +15,7 @@
 #include <linux/stat.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <memory>
 #include <liburing.h>
 
 using namespace std;
@@ -47,7 +48,7 @@ unordered_set<string> submitted_readdirs;
 // Data structures
 struct io_uring ring;
 
-unordered_set<CopyJob*> cp_jobs;
+unordered_set<std::shared_ptr<CopyJob>> cp_jobs;
 vector<io_uring_cqe*> pending_cqes;
 unordered_set<string> created_dest_dirs;
 RegFDAllocator<REG_FD_SIZE> fd_alloc;
@@ -196,17 +197,14 @@ void process_getdents(const io_uring_cqe *cqe) {
 		if (strcmp(dent.d_name, ".") && strcmp(dent.d_name, "..")) 
         {
 			// Create copy jobs;
-            src_path = filesystem::path(meta->dirpath);
-            src_path /= dent.d_name;
-            dst_path = filesystem::path(meta->dest_dirpath);
-            dst_path /= dent.d_name;
+            src_path = meta->dirpath / dent.d_name;
+            dst_path = meta->dest_dirpath / dent.d_name;
             if(dent.d_type == DT_REG) {
                 // cout << "dirent: " << dent->d_name << endl;
 
                 // TODO: Compute the dest dirpath instead.
                 // Sets the state to FSTAT_PENDING
-                CopyJob *job = new CopyJob(src_path, dst_path);
-                cp_jobs.insert(job);
+                cp_jobs.insert(std::make_shared<CopyJob>(src_path, dst_path));
             } 
             else if (dent.d_type == DT_DIR) {
                 process_dir(src_path, dst_path);
@@ -227,7 +225,7 @@ void process_stat_copy_job(const io_uring_cqe *cqe) {
     free(meta->statbuf);
 }
 
-void process_write_completion(CopyJob *job) {
+void process_write_completion(const std::shared_ptr<CopyJob>& job) {
     if(job->get_size() - job->get_bytes_copied() == 0) {
         job->set_state(COPY_CP_DONE);
     }
@@ -325,7 +323,7 @@ int process_cqe(const io_uring_cqe *cqe) {
     return 0;
 }
 
-void _prep_copy_opens(CopyJob* job) {
+void _prep_copy_opens(std::shared_ptr<CopyJob> job) {
     struct io_uring_sqe *sqe;
     RequestMeta *meta;
 
@@ -366,7 +364,7 @@ void _prep_copy_opens(CopyJob* job) {
 
 // TODO: This can be further asynchronized/pipelined.
 // return if submitted new operation
-bool do_file_copy(CopyJob* job) {
+bool do_file_copy(std::shared_ptr<CopyJob> job) {
     struct io_uring_sqe *sqe;
     RequestMeta *meta;
 
@@ -440,7 +438,7 @@ bool do_file_copy(CopyJob* job) {
     return true;
 }
 
-void do_copy_fstat(CopyJob* job) {
+void do_copy_fstat(std::shared_ptr<CopyJob> job) {
     struct io_uring_sqe *sqe;
 
     // TODO: Fix memory leaks
@@ -461,12 +459,11 @@ void do_copy_fstat(CopyJob* job) {
 }
 
 bool process_copy_jobs() {
-    CopyJob* job_ptr;
     cout << "Processing copy_jobs: " << cp_jobs.size() << endl;
 
     bool submitted = false;
 
-    vector<CopyJob*> to_delete;
+    vector<std::shared_ptr<CopyJob>> to_delete;
 
     for(const auto& job: cp_jobs) {
         if(created_dest_dirs.find(job->get_dst_dir()) == created_dest_dirs.end()) {
@@ -500,6 +497,7 @@ bool process_copy_jobs() {
         }
     }
 
+    //! FIXME: Bad pattern; erase in place using iterators
     for(const auto& job: to_delete) {
         cp_jobs.erase(job);
     }

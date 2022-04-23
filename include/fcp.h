@@ -59,7 +59,7 @@ public:
     std::filesystem::path dest_dirpath;
     int type;
     int reg_fd;
-    CopyJob* cp_job;
+    std::shared_ptr<CopyJob> cp_job;
     struct statx *statbuf;
 
     RequestMeta(int type) {
@@ -86,9 +86,10 @@ private:
     bool src_opened;
     bool dst_opened;
 public:
-    CopyJob(std::string src, std::string dst) {
-        this->src = std::filesystem::path(src);
-        this->dst = std::filesystem::path(dst);
+    CopyJob(const std::filesystem::path& src, const std::filesystem::path& dst) {
+        //! FIXME: Too much string copying, fix me
+        this->src = src;
+        this->dst = dst;
         this->src_path = this->src.string();
         this->dst_path = this->dst.string();
         this->n_bytes_copied = 0;
