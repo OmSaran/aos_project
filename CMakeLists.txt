@@ -14,6 +14,13 @@ add_executable(cp ${CMAKE_CURRENT_SOURCE_DIR}/src/cp.cpp
 target_include_directories(cp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/)
 target_link_libraries(cp cxxopts uring)
 
+# Hybrid cp
+add_executable(cp_hybrid ${CMAKE_CURRENT_SOURCE_DIR}/src/cp_hybrid.cpp
+                  ${CMAKE_CURRENT_SOURCE_DIR}/src/buffer-lcm.cpp)
+
+target_include_directories(cp_hybrid PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/)
+target_link_libraries(cp_hybrid cxxopts uring)
+
 # fcp
 add_executable(fcp ${CMAKE_CURRENT_SOURCE_DIR}/src/fcp2.cpp)
 target_link_libraries(fcp uring)
