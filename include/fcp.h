@@ -30,7 +30,6 @@ struct linux_dirent64 {
 
 enum {
     FCP_OP_CREATDIR,
-    FCP_OP_OPENDIR,
     FCP_OP_MKDIR,
     FCP_OP_GETDENTS,
     FCP_OP_OPENFILE,
@@ -40,6 +39,7 @@ enum {
     FCP_OP_STAT_COPY_JOB,
     FCP_OP_CLOSEDIR,
     FCP_OP_CLOSEFILE,
+    FCP_OP_OPENDIR,
 };
 
 // States for copy job
@@ -68,6 +68,8 @@ public:
     std::shared_ptr<CopyJob> cp_job;
     std::unique_ptr<struct statx> statbuf;
     int copy_req_bytes;
+    // new
+    std::string* readdir_path;
 
     RequestMeta(int type) {
         this->type = type;
@@ -78,6 +80,68 @@ public:
     }
 };
 
+
+class ReadDirJob {
+private:
+    // std::filesystem::path dir;
+    std::vector<uint8_t> dirent_buf;
+    std::filesystem::path dst_path;
+    // this is also the key
+    // std::filesystem::path src_path;
+    bool opened;
+    int fd;
+public:
+    ReadDirJob() {
+        opened = false;
+        dirent_buf.resize(DIR_BUF_SIZE);
+        fd = -1;
+    }
+    ReadDirJob(std::filesystem::path dst_path) {
+        opened = false;
+        dirent_buf.resize(DIR_BUF_SIZE);
+        fd = -1;
+        this->dst_path = dst_path;
+        // this->src_path = src_path;
+    }
+
+    // const std::filesystem::path& get_src_path() {
+    //     return this->src_path;
+    // }
+
+    const std::filesystem::path& get_dst_path() {
+        return dst_path;
+    }
+
+    void set_opened() {
+        opened = true;
+    }
+
+    bool is_opened() {
+        return opened;
+    }
+
+    void resize_dirent(ssize_t size) {
+        this->dirent_buf.resize(size);
+    }
+
+    const std::vector<uint8_t>& get_dirent_buf() {
+        fprintf(stderr, "get_dirent_buf for %p\n", this);
+        return dirent_buf;
+    }
+
+    // const uint8_t* get_dirent_buf_ptr() {
+    //     fprintf(stderr, "get_dirent_buf_ptr for %p\n", this);
+    //     return (uint8_t *)&dirent_buf;
+    // }
+
+    void set_fd(int fd) {
+        this->fd = fd;
+    }
+
+    int get_fd() {
+        return fd;
+    }
+};
 
 class CopyJob {
 private:

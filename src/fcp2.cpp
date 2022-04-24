@@ -48,10 +48,10 @@ unordered_set<string> submitted_readdirs;
 struct io_uring ring;
 
 unordered_set<std::shared_ptr<CopyJob>> cp_jobs;
+unordered_map<string, ReadDirJob> readdir_jobs;
 vector<io_uring_cqe*> pending_cqes;
 unordered_set<string> created_dest_dirs;
 RegFDAllocator<REG_FD_SIZE> fd_alloc;
-unordered_map<string, std::vector<uint8_t>> dirent_buf_map;
 
 int in_progress_jobs = 0;
 //! FIXME: This is buggy, setting this to a large enough number for now.
@@ -96,7 +96,7 @@ int prep_mkdir(const filesystem::path& dst_path) {
 }
 
 // Return number of requests queued
-int prep_readdir(const filesystem::path& dirpath, std::vector<uint8_t>& dirbuf, const filesystem::path& dst_path) {
+int prep_readdir(const filesystem::path& dirpath, const std::vector<uint8_t>& dirbuf, const filesystem::path& dst_path) {
     struct io_uring_sqe *sqe;
 
     //! FIXME: mem alloc for every dir read can't be good :(
@@ -125,7 +125,7 @@ int prep_readdir(const filesystem::path& dirpath, std::vector<uint8_t>& dirbuf, 
 
     // Prepare getdents request
     // TODO: Do this in loop.
-    io_uring_prep_getdents64(sqe, meta->reg_fd, &dirbuf[0], DIR_BUF_SIZE);
+    io_uring_prep_getdents64(sqe, meta->reg_fd, (void *) &dirbuf[0], DIR_BUF_SIZE);
 
     //! FIXME: Copying strings/path is never good, use a hash/id of the entire job, and keep a job set
     meta->dirpath = dirpath;
@@ -133,6 +133,30 @@ int prep_readdir(const filesystem::path& dirpath, std::vector<uint8_t>& dirbuf, 
     io_uring_sqe_set_data(sqe, (void *)meta);
     sqe->flags = IOSQE_FIXED_FILE;
     // sqe->file_index = meta->reg_fd + 1;
+
+    return 1;
+}
+
+// Return number of requests queued
+int prep_open_for_readdir(const filesystem::path& dirpath) {
+    struct io_uring_sqe *sqe;
+
+    //! FIXME: mem alloc for every dir read can't be good :(
+    RequestMeta *meta = new RequestMeta(FCP_OP_OPENDIR);
+
+    // Get sqe
+    sqe = io_uring_get_sqe(&ring);
+    assert(sqe != NULL);
+
+    unordered_map<string, ReadDirJob>::iterator iter = readdir_jobs.find(dirpath.string());
+
+    cout << "Doing opendir for " << iter->first << endl;
+    meta->readdir_path = (string *)(&(iter->first));
+
+    // Prepare open request
+    // TODO: We don't want to open it again for subsequent writes.
+    io_uring_prep_openat(sqe, 0, iter->first.c_str(), O_RDONLY, 0);
+    io_uring_sqe_set_data(sqe, (void *)meta);
 
     return 1;
 }
@@ -155,13 +179,17 @@ void process_dir(const filesystem::path& src_path, const filesystem::path& dst) 
         dirjobs.insert(dst.string());
     }
 
-    dirent_buf_map[src_path.string()].resize(DIR_BUF_SIZE);
+#ifndef FIXED_FD
+    readdir_jobs[src_path.string()] = ReadDirJob(dst);
+    num_wait += prep_open_for_readdir(src_path);
+#else
 
     // if(submitted_readdirs.find(src_path) == submitted_readdirs.end()) {
         // Prepare readdir request
-        num_wait += prep_readdir(src_path, dirent_buf_map[src_path.string()], dst);
+        num_wait += prep_readdir(src_path, readdir_jobs[src_path.string()].get_dirent_buf(), dst);
         // need_submission = true;
     // }
+#endif
 
     submit_jobs(num_wait);
 }
@@ -207,6 +235,62 @@ int prep_close(int reg_fd, int type) {
     return 1;
 }
 
+int prep_close_dir(ReadDirJob& job) {
+    struct io_uring_sqe *sqe;
+
+    sqe = io_uring_get_sqe(&ring);
+    assert(sqe != NULL);
+
+    io_uring_prep_close(sqe, job.get_fd());
+    sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+    
+    //! SEGFAULT: If you see segfault, look here for clues, we don't pass user data here
+
+    return 0;
+}
+
+void process_getdents_nofixed(const io_uring_cqe *cqe) {
+    // Read the direntry list and then add to the cpjobs
+    // copyjob* job = new copyjob(src, dst, dst_dir_path)
+    assert(cqe->res >= 0);
+
+    uint8_t *bufp;
+	uint8_t *end;
+    RequestMeta *meta = (RequestMeta *)cqe->user_data;
+    filesystem::path src_path, dst_path, dst_dir;
+
+    const vector<uint8_t>& dirent_buf = readdir_jobs[*meta->readdir_path].get_dirent_buf();
+
+    bufp = (uint8_t *)&dirent_buf[0];
+    end = bufp + cqe->res;
+
+    while (bufp < end) {
+		struct linux_dirent64 *dent;
+
+		dent = (struct linux_dirent64 *)bufp;
+        cout << dent->d_name << endl;
+		if (strcmp(dent->d_name, ".") && strcmp(dent->d_name, "..")) {
+			// Create copy jobs;
+            src_path = filesystem::path(*meta->readdir_path) / dent->d_name;
+            dst_path = readdir_jobs[*meta->readdir_path].get_dst_path() / dent->d_name;
+            if(dent->d_type == DT_REG) {
+                //// cout << "dirent: " << dent->d_name << endl;
+                // Sets the state to FSTAT_PENDING
+                // cp_jobs.insert(std::make_shared<CopyJob>(src_path, dst_path));
+            } 
+            else if (dent->d_type == DT_DIR) {
+                process_dir(src_path, dst_path);
+            }
+		}
+		bufp += dent->d_reclen;
+	}
+
+    int num = prep_close_dir(readdir_jobs[*meta->readdir_path]);
+    submit_jobs(num);
+
+    readdir_jobs.erase(*meta->readdir_path);
+}
+
 void process_getdents(const io_uring_cqe *cqe) {
     // Read the direntry list and then add to the cpjobs
     // copyjob* job = new copyjob(src, dst, dst_dir_path)
@@ -217,7 +301,7 @@ void process_getdents(const io_uring_cqe *cqe) {
     RequestMeta *meta = (RequestMeta *)cqe->user_data;
     filesystem::path src_path, dst_path, dst_dir;
 
-    bufp = (uint8_t *)&dirent_buf_map[meta->dirpath][0];
+    bufp = (uint8_t *)&readdir_jobs[meta->dirpath].get_dirent_buf()[0];
     end = bufp + cqe->res;
 
     while (bufp < end) {
@@ -240,7 +324,7 @@ void process_getdents(const io_uring_cqe *cqe) {
 		bufp += dent->d_reclen;
 	}
 
-    dirent_buf_map.erase(meta->dirpath);
+    readdir_jobs.erase(meta->dirpath);
     assert(meta->reg_fd != -1);
 
     // int num = prep_close(meta->reg_fd, FCP_OP_CLOSEDIR);
@@ -278,6 +362,42 @@ void process_closefile(const struct io_uring_cqe *cqe) {
     fd_alloc.release(meta->reg_fd);
 }
 
+int prep_readdir_unfixed(RequestMeta& meta, int fd) {
+    struct io_uring_sqe *sqe;
+
+    // Get sqe for getdents
+    sqe = io_uring_get_sqe(&ring);
+
+    assert(sqe != NULL);
+    const vector<uint8_t>& dirbuf = readdir_jobs[*meta.readdir_path].get_dirent_buf();
+
+    meta.type = FCP_OP_GETDENTS;
+
+    // Prepare getdents request
+    // TODO: Do this in loop.
+    io_uring_prep_getdents64(sqe, fd, (void *)&dirbuf[0], DIR_BUF_SIZE);
+    io_uring_sqe_set_data(sqe, (void *)&meta);
+
+    return 1;
+}
+
+void do_getdents_unfixed_fd(RequestMeta& meta, int fd) {
+    int num = 0;
+    num += prep_readdir_unfixed(meta, fd);
+
+    submit_jobs(num);
+}
+
+void process_opendir(const struct io_uring_cqe *cqe) {
+    RequestMeta *meta = (RequestMeta *)cqe->user_data;
+    cout << "Processing opendir for: " << *meta->readdir_path << endl;
+    
+    readdir_jobs[*meta->readdir_path].set_fd(cqe->res);
+    readdir_jobs[*meta->readdir_path].set_opened();
+
+    do_getdents_unfixed_fd(*meta, cqe->res);
+}
+
 /**
  * Process the current cqe //and re-process the rest 
  */
@@ -303,13 +423,25 @@ int process_cqe(const io_uring_cqe *cqe) {
                 cerr << "Getdents operation failed: " << strerror(-cqe->res) << endl;
                 exit(1);
             }
+#ifndef FIXED_FD
+            process_getdents_nofixed(cqe);
+#else
             process_getdents(cqe);
+#endif
             break;
         }
         case FCP_OP_OPENDIR: {
             // TODO: 
+#ifndef FIXED_FD
+            if(cqe->res < 0) {
+                cerr << "Opendir operation failed: " << strerror(-cqe->res) << endl;
+                exit(1);
+            }
+            process_opendir(cqe);
+#else
             cerr << "FCP_OP_OPENDIR not handled" << endl;
             exit(1);
+#endif
             break;
         }
         case FCP_OP_READ: {
@@ -606,6 +738,10 @@ bool process_copy_jobs() {
     return submitted;
 }
 
+void process_readdir_jobs() {
+
+}
+
 int main() {
     int ret;
     int files[REG_FD_SIZE];
@@ -619,8 +755,8 @@ int main() {
     // created_dest_dirs = new unordered_set<string>();
     // dirent_buf_map = new unordered_map<string, uint8_t*>();
 
-    // ret = io_uring_queue_init(RINGSIZE, &ring, 0);
-    ret = io_uring_queue_init_params(RINGSIZE, &ring, &params);
+    ret = io_uring_queue_init(RINGSIZE, &ring, 0);
+    // ret = io_uring_queue_init_params(RINGSIZE, &ring, &params);
     if (ret != 0)
     {
         cerr << "Failed to init io_uring queue " << strerror(-ret) << endl;
@@ -659,8 +795,8 @@ int main() {
         // TODO: P2: Find a better way to determine all jobs are complete.
         // ret = io_uring_wait_cqe_nr(&ring, &cqe, in_progress_jobs-1);
 
-        // ret = io_uring_wait_cqe_timeout(&ring, &cqe, &ts);
-        ret = io_uring_peek_cqe(&ring, &cqe);
+        ret = io_uring_wait_cqe_timeout(&ring, &cqe, &ts);
+        // ret = io_uring_peek_cqe(&ring, &cqe);
         if(ret != 0) {
             assert(cqe == NULL);
             if(in_progress_jobs == 0)
@@ -680,11 +816,14 @@ int main() {
         if(ret == 0) {
             io_uring_cqe_seen(&ring, cqe);
             in_progress_jobs -= 1;
-            // cout << "in_progress_jobs = " << in_progress_jobs << endl;
+            cout << "in_progress_jobs = " << in_progress_jobs << endl;
         } else {
             assert(0);
         }
         process_copy_jobs();
         process_dir_jobs();
+#ifndef FIXED_FD
+        // process_readdir_jobs();
+#endif
     }
 }
