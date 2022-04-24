@@ -14,7 +14,7 @@
 #define RINGSIZE 32768
 #define REG_FD_SIZE 32768
 #define IORING_OP_GETDENTS64 41
-#define MAX_RW_BUF_SIZE 4096
+#define MAX_RW_BUF_SIZE 131072
 
 
 struct linux_dirent64 {
@@ -25,7 +25,7 @@ struct linux_dirent64 {
 	char		d_name[]; /* Filename (null-terminated) */
 };
 
-#define DIR_BUF_SIZE 16384
+#define DIR_BUF_SIZE 65535
 // #define MAX_DIR_ENT DIR_BUF_SIZE / sizeof(linux_dirent64)
 
 enum {
@@ -38,6 +38,8 @@ enum {
     FCP_OP_WRITE,
     FCP_OP_CREATFILE,
     FCP_OP_STAT_COPY_JOB,
+    FCP_OP_CLOSEDIR,
+    FCP_OP_CLOSEFILE,
 };
 
 // States for copy job
@@ -117,6 +119,8 @@ public:
     }
 
     void free_buf() {
+        if(this->buf == NULL)
+            return;
         free(this->buf);
         this->buf = NULL;
     }
@@ -178,7 +182,6 @@ public:
     }
     
     void set_size(ssize_t size) {
-        std::cout << "Setting the size " << size << " for the file: " << this->dst_path << std::endl;
         this->size = size;
     }
 
@@ -218,7 +221,7 @@ public:
 
     // Returns -1 if full
     int get_free() {
-        for(int i=0; i<N; i++) {
+        for(int i=5; i<N; i++) {
             if(!busy_list[i]) {
                 busy_list[i] = true;
                 return i;
