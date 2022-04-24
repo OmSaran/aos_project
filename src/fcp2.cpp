@@ -365,9 +365,6 @@ void process_write_completion(const std::shared_ptr<CopyJob>& job, int bytes_wri
 
     if(job->get_size() - job->get_bytes_copied() == 0) {
         job->set_state(COPY_CP_DONE);
-        assert(job->get_buf() != NULL);
-        fprintf(stderr, "Freeing the address %p for the file %s\n", job->get_buf(), job->get_dst_path().c_str());
-        job->free_buf();
     }
 }
 
@@ -480,6 +477,7 @@ int process_cqe(const io_uring_cqe *cqe) {
             } else {
                 cout << "GOT CQE! A write operation completed: " << cqe->res << endl;
                 process_write_completion(meta->cp_job, cqe->res, meta);
+                free(meta->buf);
             }
             break;
         }
@@ -697,6 +695,7 @@ bool do_file_copy(std::shared_ptr<CopyJob> job) {
     meta = new RequestMeta(FCP_OP_WRITE);
     meta->copy_req_bytes = bytes_to_copy;
     meta->cp_job = job;
+    meta->buf = buf;
     job->set_buf(buf);
     cout << "WRITE ISSUE: " << job->get_dst_path() << " " << meta->cp_job << " = " << job  << endl;
     io_uring_sqe_set_data(sqe, (void *)meta);
@@ -791,8 +790,8 @@ bool process_copy_jobs() {
             cerr << "Copy Job in invalid state " << job->get_state() << " Crashing" << endl;
             exit(1);
         }
-        if(to_delete.size() > 0)
-            break;
+        // if(to_delete.size() > 0)
+        //     break;
     }
 
     //! FIXME: Bad pattern; erase in place using iterators
@@ -829,7 +828,7 @@ int main() {
         return 1;
     }
 
-    const filesystem::path src_dir("/home/ubuntu/project/aos_project/build");
+    const filesystem::path src_dir("/home/ubuntu/project/aos_project/linux-block");
     const filesystem::path dst_dir("/home/ubuntu/project/aos_project/dst_dir");
 
     created_dest_dirs.insert("/home/ubuntu/project/aos_project");

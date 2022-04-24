@@ -68,6 +68,7 @@ public:
     std::shared_ptr<CopyJob> cp_job;
     std::unique_ptr<struct statx> statbuf;
     int copy_req_bytes;
+    char *buf;
     // new
     std::string* readdir_path;
 
@@ -125,7 +126,6 @@ public:
     }
 
     const std::vector<uint8_t>& get_dirent_buf() {
-        fprintf(stderr, "get_dirent_buf for %p\n", this);
         return dirent_buf;
     }
 
@@ -185,8 +185,11 @@ public:
     }
 
     void free_buf() {
-        if(this->buf == NULL)
+        std::cout << "doing free buf" << std::endl;
+        if(this->buf == NULL) {
+            std::cout << "NULL BUF" << std::endl;
             return;
+        }
         free(this->buf);
         this->buf = NULL;
     }
@@ -208,7 +211,6 @@ public:
     }
 
     void set_src_fd(int fd) {
-        std::cout << "setting source fd = " << fd << std::endl;
         this->src_fd = fd;
     }
 
@@ -217,7 +219,6 @@ public:
     }
 
     void set_dst_fd(int fd) {
-        std::cout << "setting destination fd = " << fd << std::endl;
         this->dst_fd = fd;
     }
 
