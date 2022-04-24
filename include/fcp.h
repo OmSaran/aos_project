@@ -158,6 +158,7 @@ private:
     int dst_fd;
     bool src_opened;
     bool dst_opened;
+    bool open_submitted;
     char *buf;
 public:
     CopyJob(const std::filesystem::path& src, const std::filesystem::path& dst) {
@@ -172,6 +173,7 @@ public:
         this->state = COPY_STAT_PENDING;
         this->src_opened = false;
         this->dst_opened = false;
+        this->open_submitted = false;
     }
 
     char* get_buf() {
@@ -206,6 +208,7 @@ public:
     }
 
     void set_src_fd(int fd) {
+        std::cout << "setting source fd = " << fd << std::endl;
         this->src_fd = fd;
     }
 
@@ -214,6 +217,7 @@ public:
     }
 
     void set_dst_fd(int fd) {
+        std::cout << "setting destination fd = " << fd << std::endl;
         this->dst_fd = fd;
     }
 
@@ -247,6 +251,14 @@ public:
     
     void set_size(ssize_t size) {
         this->size = size;
+    }
+
+    void set_open_submitted() {
+        this->open_submitted = true;
+    }
+
+    bool get_open_submitted() {
+        return this->open_submitted;
     }
 
     ssize_t get_bytes_copy_submitted() {

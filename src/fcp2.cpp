@@ -64,7 +64,7 @@ static inline void io_uring_prep_getdents64(struct io_uring_sqe *sqe, int fd,
 }
 
 void submit_jobs(int num) {
-    // cout << "submitting " << num << " jobs" << endl;
+    cout << "submitting " << num << " jobs" << endl;
     in_progress_jobs += num;
     io_uring_submit(&ring);
 }
@@ -81,7 +81,7 @@ int prep_mkdir(const filesystem::path& dst_path) {
 
     // Prepare mkdir request
     // TODO: Fix perms
-    // cout << "Creating directory at " << dst_path.c_str() << endl;
+    cout << "Creating directory at " << dst_path.c_str() << endl;
     
     // TODO: Fix memory leak. 
     string *create_dirname = new string(dst_path);
@@ -97,6 +97,9 @@ int prep_mkdir(const filesystem::path& dst_path) {
 
 // Return number of requests queued
 int prep_readdir(const filesystem::path& dirpath, const std::vector<uint8_t>& dirbuf, const filesystem::path& dst_path) {
+#ifndef FIXED_FD
+    assert(0);
+#endif
     struct io_uring_sqe *sqe;
 
     //! FIXME: mem alloc for every dir read can't be good :(
@@ -208,7 +211,7 @@ void process_dir_jobs() {
             submit_jobs(ret);
             to_erase.push_back(dir);
         } else {
-            // cout << "Could not find parent directory for " << dst.string() << endl;   
+            cout << "Could not find parent directory for " << dst.string() << endl;   
         }
     }
 
@@ -217,8 +220,11 @@ void process_dir_jobs() {
     }
 }
 
-// Unused: closing fixed files not supported?
+//! UNUSED: closing fixed files not supported?
 int prep_close(int reg_fd, int type) {
+#ifndef FIXED_FD
+    assert(0);
+#endif
     struct io_uring_sqe *sqe;
     RequestMeta *meta = new RequestMeta(type);
     
@@ -233,6 +239,20 @@ int prep_close(int reg_fd, int type) {
     io_uring_sqe_set_data(sqe, (void *)meta);
 
     return 1;
+}
+
+int prep_close_nofixed(int fd) {
+    struct io_uring_sqe *sqe;
+
+    sqe = io_uring_get_sqe(&ring);
+    assert(sqe != NULL);
+
+    io_uring_prep_close(sqe, fd);
+    sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+
+    //! SEGFAULT: If you see segfault, look here for clues, we don't pass user data here
+
+    return 0;
 }
 
 int prep_close_dir(ReadDirJob& job) {
@@ -268,15 +288,14 @@ void process_getdents_nofixed(const io_uring_cqe *cqe) {
 		struct linux_dirent64 *dent;
 
 		dent = (struct linux_dirent64 *)bufp;
-        cout << dent->d_name << endl;
 		if (strcmp(dent->d_name, ".") && strcmp(dent->d_name, "..")) {
 			// Create copy jobs;
             src_path = filesystem::path(*meta->readdir_path) / dent->d_name;
             dst_path = readdir_jobs[*meta->readdir_path].get_dst_path() / dent->d_name;
             if(dent->d_type == DT_REG) {
-                //// cout << "dirent: " << dent->d_name << endl;
+                //cout << "dirent: " << dent->d_name << endl;
                 // Sets the state to FSTAT_PENDING
-                // cp_jobs.insert(std::make_shared<CopyJob>(src_path, dst_path));
+                cp_jobs.insert(std::make_shared<CopyJob>(src_path, dst_path));
             } 
             else if (dent->d_type == DT_DIR) {
                 process_dir(src_path, dst_path);
@@ -313,7 +332,7 @@ void process_getdents(const io_uring_cqe *cqe) {
             src_path = meta->dirpath / dent->d_name;
             dst_path = meta->dest_dirpath / dent->d_name;
             if(dent->d_type == DT_REG) {
-                //// cout << "dirent: " << dent->d_name << endl;
+                //cout << "dirent: " << dent->d_name << endl;
                 // Sets the state to FSTAT_PENDING
                 cp_jobs.insert(std::make_shared<CopyJob>(src_path, dst_path));
             } 
@@ -336,7 +355,7 @@ void process_getdents(const io_uring_cqe *cqe) {
 void process_stat_copy_job(const io_uring_cqe *cqe) {
     RequestMeta *meta = (RequestMeta *) cqe->user_data;
     meta->cp_job->set_size(meta->statbuf->stx_size);
-    // cout << "Setting the state to COPY_STAT_DONE for file " << meta->cp_job->get_dst_path() << endl;
+    cout << "Setting the state to COPY_STAT_DONE for file " << meta->cp_job->get_dst_path() << endl;
     meta->cp_job->set_state(COPY_STAT_DONE);
 }
 
@@ -409,7 +428,7 @@ int process_cqe(const io_uring_cqe *cqe) {
     switch(meta->type)
     {
         case FCP_OP_MKDIR: {
-            // cout << "GOT CQE! Processing a mkdir operation" << endl;
+            cout << "GOT CQE! Processing an mkdir operation" << endl;
             if(cqe->res < 0) {
                 cerr << "Mkdir at " << meta->dirpath << " operation failed: " << strerror(-cqe->res) << endl;
                 exit(1);
@@ -418,7 +437,7 @@ int process_cqe(const io_uring_cqe *cqe) {
             break;
         }
         case FCP_OP_GETDENTS: {
-            // cout << "GOT CQE! Processing a getdents operation" << endl;
+            cout << "GOT CQE! Processing a getdents operation" << endl;
             if(cqe->res < 0) {
                 cerr << "Getdents operation failed: " << strerror(-cqe->res) << endl;
                 exit(1);
@@ -449,7 +468,7 @@ int process_cqe(const io_uring_cqe *cqe) {
                 cerr << "GOT CQE! A read operation failed: " << strerror(-cqe->res) << endl;
                 exit(1);
             } else {
-                // cout << "GOT CQE! A read operation completed: " << cqe->res << endl;
+                cout << "GOT CQE! A read operation completed: " << cqe->res << endl;
             }
             // return 1;
             break;
@@ -459,7 +478,7 @@ int process_cqe(const io_uring_cqe *cqe) {
                 cerr << "GOT CQE! A write operation failed: " << strerror(-cqe->res) << endl;
                 exit(1);
             } else {
-                // cout << "GOT CQE! A write operation completed: " << cqe->res << endl;
+                cout << "GOT CQE! A write operation completed: " << cqe->res << endl;
                 process_write_completion(meta->cp_job, cqe->res, meta);
             }
             break;
@@ -470,8 +489,11 @@ int process_cqe(const io_uring_cqe *cqe) {
                 exit(1);
             } else {
                 RequestMeta *meta = (RequestMeta *)cqe->user_data;
-                meta->cp_job->set_src_opened();
-                // cout << "GOT CQE! A create file operation for file " << meta->cp_job->get_dst_path() << " for copyjob has completed: " << cqe->res << endl;
+                meta->cp_job->set_dst_opened();
+#ifndef FIXED_FD
+                meta->cp_job->set_dst_fd(cqe->res);
+#endif
+                cout << "GOT CQE! A create file operation for file " << meta->cp_job->get_dst_path() << " for copyjob has completed: " << cqe->res << endl;
             }
             break;
         }
@@ -480,19 +502,23 @@ int process_cqe(const io_uring_cqe *cqe) {
                 cerr << "A stat operation for copy job failed: " << strerror(-cqe->res) << endl;
                 exit(1);
             } else {
-                // cout << "GOT CQE! A stat operation for copy job completed: " << cqe->res << endl;
+                cout << "GOT CQE! A stat operation for copy job completed: " << cqe->res << endl;
                 process_stat_copy_job(cqe);
             }
             break;
         }
         case FCP_OP_OPENFILE: {
+            //! NOTE: This works ONLY in context of opening source file for reading in a copy job.
             if(cqe->res < 0) {
                 cerr << "An openfile operation for copy job failed: " << strerror(-cqe->res) << endl;
                 exit(1);
             } else {
                 RequestMeta *meta = (RequestMeta *)cqe->user_data;
-                meta->cp_job->set_dst_opened();
-                // cout << "GOT CQE! An openfile operation for copyjob of file " << meta->cp_job->get_dst_path() << " has completed: " << cqe->res  << endl;
+                meta->cp_job->set_src_opened();
+#ifndef FIXED_FD
+                meta->cp_job->set_src_fd(cqe->res);
+#endif
+                cout << "GOT CQE! An openfile operation for copyjob of src file " << meta->cp_job->get_src_path() << " has completed: " << cqe->res  << endl;
             }
             break;
         }
@@ -528,8 +554,11 @@ int _prep_copy_opens(std::shared_ptr<CopyJob> job) {
     struct io_uring_sqe *sqe;
     RequestMeta *meta;
 
+#ifndef FIXED_FD
+#else
     int dst_reg_fd = fd_alloc.get_free();
     int src_reg_fd = fd_alloc.get_free();
+#endif
 
     // ***** BEGIN: Open src dir *****
     //
@@ -537,8 +566,12 @@ int _prep_copy_opens(std::shared_ptr<CopyJob> job) {
     assert(sqe != NULL);
 
     // TODO: Add fadvise if needed
+#ifndef FIXED_FD
+    io_uring_prep_openat(sqe, -1, job->get_src_path().c_str(), O_RDONLY, 0);
+#else
     io_uring_prep_openat_direct(sqe, -1, job->get_src_path().c_str(), O_RDONLY, 0, src_reg_fd);
-    sqe->flags = IOSQE_IO_LINK;
+#endif
+    // sqe->flags = IOSQE_IO_LINK;
     // sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     meta = new RequestMeta(FCP_OP_OPENFILE);
     meta->cp_job = job;
@@ -551,16 +584,23 @@ int _prep_copy_opens(std::shared_ptr<CopyJob> job) {
     assert(sqe != NULL);
 
     // TODO: Fix permissions
+#ifndef FIXED_FD
+    io_uring_prep_openat(sqe, -1, job->get_dst_path().c_str(), O_CREAT | O_WRONLY, 0777);
+#else
     io_uring_prep_openat_direct(sqe, -1, job->get_dst_path().c_str(), O_CREAT | O_WRONLY, 0777, dst_reg_fd);
-    sqe->flags = IOSQE_IO_LINK;
+#endif
+    // sqe->flags = IOSQE_IO_LINK;
     // sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     meta = new RequestMeta(FCP_OP_CREATFILE);
     meta->cp_job = job;
     io_uring_sqe_set_data(sqe, (void *) meta);
     // ***** END: Open/Create dst dir *****
 
+#ifndef FIXED_FD
+#else
     job->set_src_fd(src_reg_fd);
     job->set_dst_fd(dst_reg_fd);
+#endif
 
     return 2;
 }
@@ -573,6 +613,7 @@ bool do_file_copy(std::shared_ptr<CopyJob> job) {
     //     job->set_state(COPY_CP_DONE);
     //     return false;
     // }
+    cout << "in do_file_copy" << endl;;
 
     struct io_uring_sqe *sqe;
     RequestMeta *meta;
@@ -585,7 +626,7 @@ bool do_file_copy(std::shared_ptr<CopyJob> job) {
     // finished copying the file
     if(job->get_size() > 0 && bytes_to_copy == 0 ) {
         if(job->get_state() == COPY_CP_DONE) {
-            // cout << "Error: " << job->get_dst_path() << endl;
+            cout << "Error: " << job->get_dst_path() << endl;
             assert(0);
             // job->set_state(COPY_CP_DONE);
         }
@@ -602,26 +643,39 @@ bool do_file_copy(std::shared_ptr<CopyJob> job) {
     // Submission chain.
     // open(src) -> open(dst) -> read(src) -> write(src) or read(src) -> write(src)
 
-    if(job->get_bytes_copy_submitted() == 0) {
+    if(job->get_bytes_copy_submitted() == 0 && job->get_open_submitted() == false) {
         // This means that this is the first write operation so we need to do open as well.
         num_jobs += _prep_copy_opens(job);
+#ifndef FIXED_FD
+
+        //! FIXME: Just return directly?
+        if(!job->is_dst_opened() || !job->is_src_opened()) {
+            submit_jobs(num_jobs);
+            job->set_open_submitted();
+            cout << "DOING NOTHING: " << job->get_dst_path() << endl;
+            return false;
+        }
+#endif
     } else {
         // If the file creation/openings have not completed, then do nothing.
         if(!job->is_dst_opened() || !job->is_src_opened()) {
-            // cout << "DOING NOTHING: " << job->get_dst_path() << endl;
+            cout << "DOING NOTHING: " << job->get_dst_path() << endl;
             return false;
         }
     }
 
-    // cout << "bytes_to_copy = " << bytes_to_copy << " for file " << job->get_dst_path() << endl;
+    cout << "bytes_to_copy = " << bytes_to_copy << " for file " << job->get_dst_path() << endl;
 
     // ***** BEGIN: Read src file *****
     sqe = io_uring_get_sqe(&ring);
     assert(sqe != NULL);
 
-    // cout << "src_reg_fd = " << job->get_src_fd() << endl;
+    cout << "src_reg_fd = " << job->get_src_fd() << endl;
+    cout << "Reading from " << job->get_src_fd() << endl;
     io_uring_prep_read(sqe, job->get_src_fd(), buf, bytes_to_copy, job->get_bytes_copy_submitted());
+#ifdef FIXED_FD
     sqe->flags = IOSQE_FIXED_FILE;
+#endif
     // hardlink won't fail for partial reads.
     sqe->flags |= IOSQE_IO_LINK;
     sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
@@ -635,14 +689,16 @@ bool do_file_copy(std::shared_ptr<CopyJob> job) {
 
     // TODO: Use file size for deterministic copy size.
     // TODO: Skip success CQE unless it is the last write
-    // cout << "dst_reg_fd = " << job->get_dst_fd() << endl;
+    cout << "dst_reg_fd = " << job->get_dst_fd() << endl;
     io_uring_prep_write(sqe, job->get_dst_fd(), buf, bytes_to_copy, job->get_bytes_copy_submitted());
+#ifdef FIXED_FD
     sqe->flags = IOSQE_FIXED_FILE;
+#endif
     meta = new RequestMeta(FCP_OP_WRITE);
     meta->copy_req_bytes = bytes_to_copy;
     meta->cp_job = job;
     job->set_buf(buf);
-    // cout << "WRITE ISSUE: " << job->get_dst_path() << " " << meta->cp_job << " = " << job  << endl;
+    cout << "WRITE ISSUE: " << job->get_dst_path() << " " << meta->cp_job << " = " << job  << endl;
     io_uring_sqe_set_data(sqe, (void *)meta);
     // ***** END: Write dst file *****
     num_jobs += 1;
@@ -673,7 +729,7 @@ void do_copy_fstat(std::shared_ptr<CopyJob> job) {
     submit_jobs(1);
 
     job->set_state(COPY_STAT_SUBMITTED);
-    // cout << "Submitted stat operation for " << job->get_dst_path() << endl;
+    cout << "Submitted stat operation for " << job->get_dst_path() << endl;
 }
 
 void do_copy_close(std::shared_ptr<CopyJob> job) {
@@ -687,7 +743,7 @@ void do_copy_close(std::shared_ptr<CopyJob> job) {
 }
 
 bool process_copy_jobs() {
-    // cout << "Processing copy_jobs: " << cp_jobs.size() << endl;
+    cout << "Processing copy_jobs: " << cp_jobs.size() << endl;
 
     bool submitted = false;
 
@@ -701,7 +757,7 @@ bool process_copy_jobs() {
 
         switch(job->get_state()) {
         case COPY_STAT_PENDING:
-            // cout << "Processing job in STAT_PENDING state "<< endl;
+            cout << "Processing job in STAT_PENDING state "<< endl;
             if(in_progress_jobs > max_in_prog)
                 break;
             do_copy_fstat(job);
@@ -711,20 +767,28 @@ bool process_copy_jobs() {
             break;
         case COPY_STAT_DONE:
         case COPY_CP_IN_PROGRESS:
-            // cout << "Processing job in STAT_DONE/CP_IN_PROGRESS " << endl;
+            cout << "Processing job in STAT_DONE/CP_IN_PROGRESS " << endl;
             if(in_progress_jobs > max_in_prog)
                 break;
             if(do_file_copy(job))
                 submitted = true;
             break;
-        case COPY_CP_DONE:
-            // cout << "Processing job in CP_DONE state "<< endl;
+        case COPY_CP_DONE: {
+            cout << "Processing job in CP_DONE state "<< endl;
             to_delete.push_back(job);
+#ifdef FIXED_FD
             fd_alloc.release(job->get_dst_fd());
             fd_alloc.release(job->get_src_fd());
+#else       
+            int num = 0;
+            num += prep_close_nofixed(job->get_src_fd());
+            num += prep_close_nofixed(job->get_dst_fd());
+            submit_jobs(num);
+#endif
             break;
+        }
         default:
-            // cout << "Copy Job in invalid state " << job->get_state() << " Crashing" << endl;
+            cerr << "Copy Job in invalid state " << job->get_state() << " Crashing" << endl;
             exit(1);
         }
         if(to_delete.size() > 0)
@@ -736,10 +800,6 @@ bool process_copy_jobs() {
         cp_jobs.erase(job);
     }
     return submitted;
-}
-
-void process_readdir_jobs() {
-
 }
 
 int main() {
@@ -769,7 +829,7 @@ int main() {
         return 1;
     }
 
-    const filesystem::path src_dir("/home/ubuntu/project/aos_project/src_dir");
+    const filesystem::path src_dir("/home/ubuntu/project/aos_project/build");
     const filesystem::path dst_dir("/home/ubuntu/project/aos_project/dst_dir");
 
     created_dest_dirs.insert("/home/ubuntu/project/aos_project");
@@ -799,8 +859,10 @@ int main() {
         // ret = io_uring_peek_cqe(&ring, &cqe);
         if(ret != 0) {
             assert(cqe == NULL);
-            if(in_progress_jobs == 0)
+            if(in_progress_jobs == 0) {
+                cout << "0 in progress jobs, exiting" << endl;
                 exit(0);
+            }
             continue;
         }
         if(ret != 0) {
@@ -822,8 +884,5 @@ int main() {
         }
         process_copy_jobs();
         process_dir_jobs();
-#ifndef FIXED_FD
-        // process_readdir_jobs();
-#endif
     }
 }
