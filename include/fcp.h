@@ -11,9 +11,10 @@
 #include <liburing.h>
 
 
-#define RINGSIZE 1024
-#define REG_FD_SIZE 1024
+#define RINGSIZE 32768
+#define REG_FD_SIZE 32768
 #define IORING_OP_GETDENTS64 41
+#define MAX_RW_BUF_SIZE 4096
 
 
 struct linux_dirent64 {
@@ -25,7 +26,7 @@ struct linux_dirent64 {
 };
 
 #define DIR_BUF_SIZE 16384
-#define MAX_DIR_ENT DIR_BUF_SIZE / sizeof(linux_dirent64)
+// #define MAX_DIR_ENT DIR_BUF_SIZE / sizeof(linux_dirent64)
 
 enum {
     FCP_OP_CREATDIR,
@@ -63,13 +64,15 @@ public:
     int type;
     int reg_fd;
     std::shared_ptr<CopyJob> cp_job;
-    std::unique_ptr<statx> statbuf;
+    std::unique_ptr<struct statx> statbuf;
+    int copy_req_bytes;
 
     RequestMeta(int type) {
         this->type = type;
         this->reg_fd = -1;
         cp_job = NULL;
         statbuf = NULL;
+        copy_req_bytes = 0;
     }
 };
 
@@ -81,13 +84,15 @@ private:
     std::string src_path;
     std::string dst_path;
     ssize_t size;
-    ssize_t n_bytes_copied;
+    ssize_t n_bytes_copy_submitted;
+    ssize_t n_bytes_copy_completed;
     int state;
     // file index
     int src_fd;
     int dst_fd;
     bool src_opened;
     bool dst_opened;
+    char *buf;
 public:
     CopyJob(const std::filesystem::path& src, const std::filesystem::path& dst) {
         //! FIXME: Too much string copying, fix me
@@ -95,11 +100,25 @@ public:
         this->dst = dst;
         this->src_path = this->src.string();
         this->dst_path = this->dst.string();
-        this->n_bytes_copied = 0;
+        this->n_bytes_copy_submitted = 0;
+        this->n_bytes_copy_completed = 0;
         this->size = -1;
         this->state = COPY_STAT_PENDING;
         this->src_opened = false;
         this->dst_opened = false;
+    }
+
+    char* get_buf() {
+        return this->buf;
+    }
+
+    void set_buf(char *buf) {
+        this->buf = buf;
+    }
+
+    void free_buf() {
+        free(this->buf);
+        this->buf = NULL;
     }
 
     bool is_dst_opened() {
@@ -163,12 +182,20 @@ public:
         this->size = size;
     }
 
+    ssize_t get_bytes_copy_submitted() {
+        return this->n_bytes_copy_submitted;
+    }
+
     ssize_t get_bytes_copied() {
-        return this->n_bytes_copied;
+        return this->n_bytes_copy_completed;
     }
     
     void add_bytes_copied(ssize_t num_bytes) {
-        this->n_bytes_copied += num_bytes;
+        this->n_bytes_copy_completed += num_bytes;
+    }
+
+    void add_bytes_copy_submitted(ssize_t num_bytes) {
+        this->n_bytes_copy_submitted += num_bytes;
     }
 };
 

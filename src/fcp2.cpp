@@ -53,10 +53,17 @@ unordered_set<string> created_dest_dirs;
 RegFDAllocator<REG_FD_SIZE> fd_alloc;
 unordered_map<string, std::vector<uint8_t>> dirent_buf_map;
 
+int in_progress_jobs = 0;
+
 static inline void io_uring_prep_getdents64(struct io_uring_sqe *sqe, int fd,
 					    void *buf, unsigned int count)
 {
 	io_uring_prep_rw(IORING_OP_GETDENTS64, sqe, fd, buf, count, 0);
+}
+
+void submit_jobs(int num) {
+    in_progress_jobs += num;
+    io_uring_submit(&ring);
 }
 
 int prep_mkdir(const filesystem::path& dst_path) {
@@ -120,7 +127,7 @@ int prep_readdir(const filesystem::path& dirpath, std::vector<uint8_t>& dirbuf, 
     sqe->flags = IOSQE_FIXED_FILE;
     // sqe->file_index = meta->reg_fd + 1;
 
-    return 2;
+    return 1;
 }
 
 void process_dir(const filesystem::path& src_path, const filesystem::path& dst) {
@@ -149,12 +156,7 @@ void process_dir(const filesystem::path& src_path, const filesystem::path& dst) 
         // need_submission = true;
     // }
 
-    io_uring_submit(&ring);
-
-
-    // num_wait = 1;
-    // ret = io_uring_submit_and_wait(&ring, 1);
-    // assert(ret == num_wait);
+    submit_jobs(num_wait);
 }
 
 
@@ -165,8 +167,8 @@ void process_dir_jobs() {
 
         if(created_dest_dirs.find(dst.parent_path()) != created_dest_dirs.end()) {
             // If parent directory has been created, then create the directory
-            prep_mkdir(dst);
-            io_uring_submit(&ring);
+            int ret = prep_mkdir(dst);
+            submit_jobs(ret);
             to_erase.push_back(dir);
         } else {
             cout << "Could not find parent directory for " << dst.string() << endl;   
@@ -175,7 +177,7 @@ void process_dir_jobs() {
 
     for(const auto& elem: to_erase) {
         dirjobs.erase(elem);
-    } 
+    }
 }
 
 void process_getdents(const io_uring_cqe *cqe) {
@@ -223,9 +225,15 @@ void process_stat_copy_job(const io_uring_cqe *cqe) {
     meta->cp_job->set_state(COPY_STAT_DONE);
 }
 
-void process_write_completion(const std::shared_ptr<CopyJob>& job) {
+void process_write_completion(const std::shared_ptr<CopyJob>& job, int bytes_written, RequestMeta *meta) {
+    assert(meta->copy_req_bytes == bytes_written);
+    job->add_bytes_copied(bytes_written);
+
     if(job->get_size() - job->get_bytes_copied() == 0) {
         job->set_state(COPY_CP_DONE);
+        assert(job->get_buf() != NULL);
+        fprintf(stderr, "Freeing the address %p for the file %s\n", job->get_buf(), job->get_dst_path().c_str());
+        job->free_buf();
     }
 }
 
@@ -279,7 +287,7 @@ int process_cqe(const io_uring_cqe *cqe) {
                 exit(1);
             } else {
                 cout << "GOT CQE! A write operation completed: " << cqe->res << endl;
-                process_write_completion(meta->cp_job);
+                process_write_completion(meta->cp_job, cqe->res, meta);
             }
             break;
         }
@@ -321,7 +329,7 @@ int process_cqe(const io_uring_cqe *cqe) {
     return 0;
 }
 
-void _prep_copy_opens(std::shared_ptr<CopyJob> job) {
+int _prep_copy_opens(std::shared_ptr<CopyJob> job) {
     struct io_uring_sqe *sqe;
     RequestMeta *meta;
 
@@ -358,6 +366,8 @@ void _prep_copy_opens(std::shared_ptr<CopyJob> job) {
 
     job->set_src_fd(src_reg_fd);
     job->set_dst_fd(dst_reg_fd);
+
+    return 2;
 }
 
 // TODO: This can be further asynchronized/pipelined.
@@ -367,8 +377,9 @@ bool do_file_copy(std::shared_ptr<CopyJob> job) {
     RequestMeta *meta;
 
     ssize_t max_buf_size = MAX_RW_BUF_SIZE;
-    ssize_t bytes_to_copy = job->get_size() - job->get_bytes_copied();
+    ssize_t bytes_to_copy = job->get_size() - job->get_bytes_copy_submitted();
     bytes_to_copy = max_buf_size < bytes_to_copy ? max_buf_size : bytes_to_copy;
+    int num_jobs = 0;
 
     // finished copying the file
     if(job->get_size() > 0 && bytes_to_copy == 0 ) {
@@ -387,9 +398,9 @@ bool do_file_copy(std::shared_ptr<CopyJob> job) {
     // Submission chain.
     // open(src) -> open(dst) -> read(src) -> write(src) or read(src) -> write(src)
 
-    if(job->get_bytes_copied() == 0) {
+    if(job->get_bytes_copy_submitted() == 0) {
         // This means that this is the first write operation so we need to do open as well.
-        _prep_copy_opens(job);
+        num_jobs += _prep_copy_opens(job);
     } else {
         // If the file creation/openings have not completed, then do nothing.
         if(!job->is_dst_opened() || !job->is_src_opened()) {
@@ -405,7 +416,7 @@ bool do_file_copy(std::shared_ptr<CopyJob> job) {
     assert(sqe != NULL);
 
     cout << "src_reg_fd = " << job->get_src_fd() << endl;
-    io_uring_prep_read(sqe, job->get_src_fd(), buf, bytes_to_copy, job->get_bytes_copied());
+    io_uring_prep_read(sqe, job->get_src_fd(), buf, bytes_to_copy, job->get_bytes_copy_submitted());
     sqe->flags = IOSQE_FIXED_FILE;
     // hardlink won't fail for partial reads.
     sqe->flags |= IOSQE_IO_LINK;
@@ -421,18 +432,21 @@ bool do_file_copy(std::shared_ptr<CopyJob> job) {
     // TODO: Use file size for deterministic copy size.
     // TODO: Skip success CQE unless it is the last write
     cout << "dst_reg_fd = " << job->get_dst_fd() << endl;
-    io_uring_prep_write(sqe, job->get_dst_fd(), buf, bytes_to_copy, job->get_bytes_copied());
+    io_uring_prep_write(sqe, job->get_dst_fd(), buf, bytes_to_copy, job->get_bytes_copy_submitted());
     sqe->flags = IOSQE_FIXED_FILE;
     meta = new RequestMeta(FCP_OP_WRITE);
+    meta->copy_req_bytes = bytes_to_copy;
     meta->cp_job = job;
+    job->set_buf(buf);
     cout << "WRITE ISSUE: " << job->get_dst_path() << " " << meta->cp_job << " = " << job  << endl;
     io_uring_sqe_set_data(sqe, (void *)meta);
     // ***** END: Write dst file *****
+    num_jobs += 1;
 
     // TODO: We assume success, fix for robustness
-    job->add_bytes_copied(bytes_to_copy);
+    job->add_bytes_copy_submitted(bytes_to_copy);
 
-    io_uring_submit(&ring);
+    submit_jobs(num_jobs);
     return true;
 }
 
@@ -450,7 +464,9 @@ void do_copy_fstat(std::shared_ptr<CopyJob> job) {
 
     io_uring_prep_statx(sqe, -1, job->get_src_path().c_str(), 0, STATX_SIZE, meta->statbuf.get());
     io_uring_sqe_set_data(sqe, meta);
-    io_uring_submit(&ring);
+
+    submit_jobs(1);
+
     job->set_state(COPY_STAT_SUBMITTED);
     cout << "Submitted stat operation for " << job->get_dst_path() << endl;
 }
@@ -551,7 +567,7 @@ int main() {
         ret = io_uring_wait_cqe_timeout(&ring, &cqe, &ts);
         if(ret != 0) {
             cerr << "Failed to get cqe: " << strerror(-ret) << endl;
-            if(cp_jobs.size() == 0 && dirjobs.size() == 0) {
+            if(in_progress_jobs == 0) {
                 cout << "No pending jobs and failed to get cqe, exiting" << endl;
                 // sync();
                 exit(0);
@@ -561,6 +577,7 @@ int main() {
         ret = process_cqe(cqe);
         if(ret == 0) {
             io_uring_cqe_seen(&ring, cqe);
+            in_progress_jobs -= 1;
         }
         process_copy_jobs();
         process_dir_jobs();
