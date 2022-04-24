@@ -51,7 +51,7 @@ unordered_set<std::shared_ptr<CopyJob>> cp_jobs;
 vector<io_uring_cqe*> pending_cqes;
 unordered_set<string> created_dest_dirs;
 RegFDAllocator<REG_FD_SIZE> fd_alloc;
-unordered_map<string, std::vector<linux_dirent64>> dirent_buf_map;
+unordered_map<string, std::vector<uint8_t>> dirent_buf_map;
 
 static inline void io_uring_prep_getdents64(struct io_uring_sqe *sqe, int fd,
 					    void *buf, unsigned int count)
@@ -84,7 +84,7 @@ int prep_mkdir(const filesystem::path& dst_path) {
 }
 
 // Return number of requests queued
-int prep_readdir(const filesystem::path& dirpath, std::vector<linux_dirent64>& dirbuf, const filesystem::path& dst_path) {
+int prep_readdir(const filesystem::path& dirpath, std::vector<uint8_t>& dirbuf, const filesystem::path& dst_path) {
     struct io_uring_sqe *sqe;
 
     //! FIXME: mem alloc for every dir read can't be good :(
@@ -141,7 +141,7 @@ void process_dir(const filesystem::path& src_path, const filesystem::path& dst) 
         dirjobs.insert(dst.string());
     }
 
-    dirent_buf_map[src_path.string()].resize(MAX_DIR_ENT);
+    dirent_buf_map[src_path.string()].resize(DIR_BUF_SIZE);
 
     // if(submitted_readdirs.find(src_path) == submitted_readdirs.end()) {
         // Prepare readdir request
@@ -182,35 +182,36 @@ void process_getdents(const io_uring_cqe *cqe) {
     // Read the direntry list and then add to the cpjobs
     // copyjob* job = new copyjob(src, dst, dst_dir_path)
     assert(cqe->res >= 0);
+
+    uint8_t *bufp;
 	uint8_t *end;
     RequestMeta *meta = (RequestMeta *)cqe->user_data;
     filesystem::path src_path, dst_path, dst_dir;
 
-	const auto& dirents = dirent_buf_map[meta->dirpath];
+    bufp = (uint8_t *)&dirent_buf_map[meta->dirpath][0];
+    end = bufp + cqe->res;
 
-    const int num_entries_read = cqe->res / sizeof(linux_dirent64);
+    while (bufp < end) {
+		struct linux_dirent64 *dent;
 
-    for (int i = 0; i < num_entries_read; i++)
-    {
-        const auto& dent = dirents[i];
-		if (strcmp(dent.d_name, ".") && strcmp(dent.d_name, "..")) 
-        {
+		dent = (struct linux_dirent64 *)bufp;
+		if (strcmp(dent->d_name, ".") && strcmp(dent->d_name, "..")) {
 			// Create copy jobs;
-            src_path = meta->dirpath / dent.d_name;
-            dst_path = meta->dest_dirpath / dent.d_name;
-            if(dent.d_type == DT_REG) {
-                // cout << "dirent: " << dent->d_name << endl;
-
-                // TODO: Compute the dest dirpath instead.
+            src_path = meta->dirpath / dent->d_name;
+            dst_path = meta->dest_dirpath / dent->d_name;
+            if(dent->d_type == DT_REG) {
+                //cout << "dirent: " << dent->d_name << endl;
                 // Sets the state to FSTAT_PENDING
                 cp_jobs.insert(std::make_shared<CopyJob>(src_path, dst_path));
             } 
-            else if (dent.d_type == DT_DIR) {
+            else if (dent->d_type == DT_DIR) {
                 process_dir(src_path, dst_path);
             }
 		}
+		bufp += dent->d_reclen;
 	}
 
+    dirent_buf_map.erase(meta->dirpath);
     assert(meta->reg_fd != -1);
     fd_alloc.release(meta->reg_fd);
 }
@@ -365,7 +366,7 @@ bool do_file_copy(std::shared_ptr<CopyJob> job) {
     struct io_uring_sqe *sqe;
     RequestMeta *meta;
 
-    ssize_t max_buf_size = 1024;
+    ssize_t max_buf_size = MAX_RW_BUF_SIZE;
     ssize_t bytes_to_copy = job->get_size() - job->get_bytes_copied();
     bytes_to_copy = max_buf_size < bytes_to_copy ? max_buf_size : bytes_to_copy;
 
@@ -441,7 +442,7 @@ void do_copy_fstat(std::shared_ptr<CopyJob> job) {
     // TODO: Fix memory leaks
     RequestMeta *meta = new RequestMeta(FCP_OP_STAT_COPY_JOB);
     meta->cp_job = job;
-    meta->statbuf = std::make_unique<statx>();
+    meta->statbuf = std::make_unique<struct statx>();
 
     // This means that stat is not done yet.
     sqe = io_uring_get_sqe(&ring);
