@@ -19,8 +19,7 @@
 
 using namespace std;
 
-// TODO: P0: File copying done only partially
-// TODO: P0: Call getdents till we see all entries -- done only partially till now.
+// TODO: P0: Call getdents till we see all entries -- done only partially till now -- enough for linux repo.
 // TODO: P0: Make use of fixed buffers.
 // TODO: P0: Use stat to get the file size, use that to pipeline bufsize of reads/writes.
 // TODO: P0: Pipeline the open/create/read/write 
