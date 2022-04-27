@@ -67,11 +67,8 @@ int handle_cqes(unsigned num_cqes)
     }
     //! TODO: Handle cqes
 
-    for (int i = 0; i < num_cqes; i++)
-    {
-        io_uring_cqe_seen(ctx.ring, cqe);
-        cqe++;
-    }
+    io_uring_cq_advance(ctx.ring, num_cqes);
+    
     ctx.pending_cqe -= num_cqes;
     return ret;
 }
