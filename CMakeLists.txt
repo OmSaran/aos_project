@@ -15,9 +15,15 @@ target_include_directories(cp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/)
 target_link_libraries(cp cxxopts uring)
 
 # fcp
-add_executable(fcp ${CMAKE_CURRENT_SOURCE_DIR}/src/fcp2.cpp)
-target_link_libraries(fcp uring)
+add_executable(fcp ${CMAKE_CURRENT_SOURCE_DIR}/src/fcp.cpp
+                   ${CMAKE_CURRENT_SOURCE_DIR}/src/buffer-lcm.cpp)
+target_link_libraries(fcp cxxopts uring)
 target_include_directories(fcp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/)
+
+# fcp2
+add_executable(fcp2 ${CMAKE_CURRENT_SOURCE_DIR}/src/fcp2.cpp)
+target_link_libraries(fcp2 uring)
+target_include_directories(fcp2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/)
 
 # release ops
 add_compile_options(

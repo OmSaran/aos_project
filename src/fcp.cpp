@@ -2,6 +2,7 @@
 #include <vector>
 #include <string>
 #include <string_view>
+#include <cassert>
 
 //! POSIX filesystem
 #include <sys/stat.h>
@@ -15,6 +16,7 @@
 
 //! liburing
 #include <liburing.h>
+#include <atomic>
 
 #include "buffer-lcm.h"
 #include "cxxopts.hpp"
@@ -28,7 +30,7 @@
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
 
-#define RINGSIZE 1024
+#define RINGSIZE 20000
 
 //! coreutils/cp.c hardcodes this to 128KiB
 enum { IO_BUFSIZE = 128 * 1024 };
@@ -36,15 +38,17 @@ struct cp_options
 {
     struct io_uring ring;
     bool recursive = false;
+    bool kernel_poll = false;
+    unsigned ktime = 60000;
 };
 
 bool copy(const std::string& src_name, const std::string& dst_name, 
           int dst_dirfd, std::string_view dst_relname, 
-          bool nonexistent_dst, const cp_options& opt);
+          bool nonexistent_dst, cp_options& opt);
 
 bool copy_dir(const std::string& src_name_in, const std::string& dst_name_in,
               int dst_dirfd, std::string_view dst_relname_in, bool new_dst,
-              const struct stat* src_sb, const cp_options& opt)
+              const struct stat* src_sb, cp_options& opt)
 {
     DIR* dirp = opendir(src_name_in.c_str());
     if (!dirp)
@@ -97,7 +101,7 @@ bool copy_dir(const std::string& src_name_in, const std::string& dst_name_in,
  */
 bool sparse_copy(int src_fd, int dest_fd, char **abuf, size_t buf_size,
                  const std::string& src_name, const std::string& dst_name,
-                 uintmax_t max_n_read, off_t& total_n_read)
+                 const size_t filesize, off_t& total_n_read, cp_options& opt)
 {
     if (!*abuf)
     {
@@ -111,50 +115,56 @@ bool sparse_copy(int src_fd, int dest_fd, char **abuf, size_t buf_size,
     total_n_read = 0;
     off_t psize = 0;
 
-    while(max_n_read)
+    struct io_uring_sqe* sqe;
+    size_t bytes_left = filesize;
+    unsigned num_cqes = 0;
+    struct io_uring* ring = &opt.ring;
+    while(bytes_left)
     {
-        ssize_t n_read = read(src_fd, *abuf, MIN(max_n_read, buf_size));
-        if (unlikely(n_read < 0))
-        {
-            if (errno == EINTR) continue;
-            fprintf(stderr, "error reading %s", src_name.c_str());
-            return false;
-        }
-        if (n_read == 0) break;
+        size_t bytes_to_read = MIN(buf_size, bytes_left);
+        sqe = io_uring_get_sqe(ring);
+        assert(sqe);
 
-        max_n_read -= n_read;
-        total_n_read += n_read;
+        // ssize_t n_read = read(src_fd, *abuf, MIN(max_n_read, buf_size));
+        io_uring_prep_read(sqe, src_fd, *abuf, bytes_to_read, -1);
+        io_uring_sqe_set_data64(sqe, 1);
+        sqe->flags = IOSQE_IO_LINK;
+        total_n_read += bytes_to_read;
+        num_cqes++;
 
-        //! loop over input buffer in chunks
-        //! TODO: Handle holes
-        const char *ptr = (const char *)*abuf;
-        while(n_read)
-        {
-            ssize_t n_write = write(dest_fd, ptr, n_read);
+        sqe = io_uring_get_sqe(ring);
+        assert(sqe);
+        io_uring_prep_write(sqe, dest_fd, *abuf, bytes_to_read, -1);
+        io_uring_sqe_set_data64(sqe, 2);
+        sqe->flags = IOSQE_IO_LINK;
+        num_cqes++;
 
-            if (unlikely(n_write < 0))
-            {
-                if (likely(errno == EINTR)) continue;
-
-                fprintf(stderr, "error writing to %s", dst_name.c_str());
-                return false;
-            }
-            if (unlikely(n_write == 0)) {
-                errno = ENOSPC;
-                fprintf(stderr, "error writing to %s (out of space)", dst_name.c_str());
-                return false;
-            }
-            ptr += n_write;
-            n_read -= n_write;
-        }
+        bytes_left -= bytes_to_read;
+    }
+    
+    int ret = io_uring_submit(ring);
+    if (unlikely(ret < 0))
+    {
+        fprintf(stderr, "io_uring_submit: %s\n", strerror(-ret));
+        return false;
     }
 
+    struct io_uring_cqe* cqe = NULL;
+    ret = io_uring_wait_cqe_nr(ring, &cqe, num_cqes);
+
+    if (unlikely(ret < 0))
+    {
+        fprintf(stderr, "io_uring_wait_cqe_nr: %s\n", strerror(-ret));
+        return false;
+    }
+    
+    //! TODO: Handle cqes
     return true;
 }
 
 bool copy_reg(const std::string& src_name, const std::string& dst_name,
               int dst_dirfd, std::string_view dst_relname,
-              const cp_options& opt,
+              cp_options& opt,
               mode_t dst_mode, mode_t omitted_permissions, bool& new_dst,
               const struct stat& src_sb)
 {
@@ -277,7 +287,7 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
         buf_size = blcm;
     }
     sparse_copy(source_desc, dest_desc, &buf, buf_size,
-                src_name, dst_name, UINTMAX_MAX, n_read);
+                src_name, dst_name, src_open_sb.st_size, n_read, opt);
     //! TODO: --preserve timestamps, ownerships, xattr, author, acl
     //! TODO: remove extra permissions
 
@@ -315,7 +325,7 @@ close_src_desc:
  */
 bool copy(const std::string& src_name, const std::string& dst_name, 
           int dst_dirfd, std::string_view dst_relname, 
-          bool nonexistent_dst, const cp_options& opt)
+          bool nonexistent_dst, cp_options& opt)
 {
     struct stat src_sb, dst_sb;
     //! TODO: symlinks are NOT followed; change to support -L
@@ -475,7 +485,7 @@ must_be_working_directory (char const *f)
   return false;
 }
 
-bool do_copy(const std::vector<std::string>& args, const cp_options& opt)
+bool do_copy(const std::vector<std::string>& args, cp_options& opt)
 {
     if (args.size() == 0) 
     {
@@ -550,6 +560,8 @@ int main(int argc, char** argv)
     options.allow_unrecognised_options();
     options.add_options()
     ("r,recursive", "copy files recursively", cxxopts::value<bool>()->default_value("false"))
+    ("k,kpoll", "use kernel polling w/ io_uring", cxxopts::value<bool>()->default_value("false"))
+    ("t,ktime", "kernel polling timeout", cxxopts::value<unsigned>()->default_value("60000"))
     ("h,help", "Print usage");
 
     auto result = options.parse(argc, argv);
@@ -561,7 +573,8 @@ int main(int argc, char** argv)
 
     cp_options cp_ops;
     cp_ops.recursive = result["recursive"].as<bool>();
-
+    cp_ops.kernel_poll = result["kpoll"].as<bool>();
+    cp_ops.ktime = result["ktime"].as<unsigned>();
     /**
      * Options not supported:
      * 1. -p: preserve perms
@@ -577,11 +590,20 @@ int main(int argc, char** argv)
      */
 
     //! Init io_uring
-    //! TODO: try kernel polling
-    int res = io_uring_queue_init(RINGSIZE, &cp_ops.ring, 0);
+    struct io_uring_params params;
+    memset(&params, 0, sizeof(io_uring_params));
+    // params.sq_entries = RINGSIZE;
+    // params.cq_entries = RINGSIZE * 2;
+    //! TODO: Handle wakeup
+    if (cp_ops.kernel_poll)
+    {
+        params.flags |= IORING_SETUP_SQPOLL;
+        params.sq_thread_idle = cp_ops.ktime;
+    }
+    int res = io_uring_queue_init_params(RINGSIZE, &cp_ops.ring, &params);
     if (res != 0)
     {
-        fprintf(stderr, "failed to init io_uring queue (%d)", res);
+        fprintf(stderr, "failed to init io_uring queue (%s)\n", strerror(-res));
         return EXIT_FAILURE;
     }
     bool ret = do_copy(result.unmatched(), cp_ops);

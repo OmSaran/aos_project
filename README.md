@@ -1,9 +1,18 @@
 # Advanced Operating Systems Project
 
 ## Requirements
-```
-liburing
-```
+
+1. Library Dependencies
+    ```
+    liburing
+    ```
+
+2. Programs should have `CAP_SYS_NICE` capability
+    ```
+    sudo setcap 'cap_sys_nice=eip' fcp
+    sudo setcap 'cap_sys_nice=eip' fcp2
+    ```
+
 
 ## Build
 ```
