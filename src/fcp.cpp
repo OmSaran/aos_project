@@ -31,7 +31,7 @@
 #define unlikely(x)     __builtin_expect((x),0)
 
 //! Must be >= 2
-#define RINGSIZE 1 << 14
+#define RINGSIZE (1 << 14)
 
 //! Must be a multiple of 2
 #define MAX_OPEN_FILES 1000
@@ -43,6 +43,7 @@ struct {
     struct io_uring* ring;
     unsigned pending_cqe;
     std::vector<int> open_fds;
+    char buf[IO_BUFSIZE];
 } ctx;
 
 void close_all_files()
@@ -65,6 +66,12 @@ int handle_cqes(unsigned num_cqes)
         return ret;
     }
     //! TODO: Handle cqes
+
+    for (int i = 0; i < num_cqes; i++)
+    {
+        io_uring_cqe_seen(ctx.ring, cqe);
+        cqe++;
+    }
     ctx.pending_cqe -= num_cqes;
     return ret;
 }
@@ -133,32 +140,43 @@ bool copy_dir(const std::string& src_name_in, const std::string& dst_name_in,
  * @return true sucessful completion
  * @return false 
  */
-bool sparse_copy(int src_fd, int dest_fd, char **abuf, size_t buf_size,
+bool sparse_copy(int src_fd, int dest_fd, char *buf, size_t buf_size,
                  const std::string& src_name, const std::string& dst_name,
                  const size_t filesize, off_t& total_n_read, cp_options& opt)
 {
-    if (!*abuf)
-    {
-        *abuf = (char *)aligned_alloc(getpagesize(), buf_size);
-        if (unlikely(*abuf == NULL))
-        {
-            fprintf(stderr, "failed to allocate memory for buffer %d %ld", getpagesize(), buf_size);
-            return false;
-        }
-    }
+    // if (!*abuf)
+    // {
+    //     *abuf = (char *)aligned_alloc(getpagesize(), buf_size);
+    //     if (unlikely(*abuf == NULL))
+    //     {
+    //         fprintf(stderr, "failed to allocate memory for buffer %d %ld", getpagesize(), buf_size);
+    //         return false;
+    //     }
+    // }
     total_n_read = 0;
     off_t psize = 0;
 
     struct io_uring_sqe* sqe;
     size_t bytes_left = filesize;
     unsigned num_cqes = 0;
+    bool unsubmitted_sqe = false;
     while(bytes_left)
     {
         //! Free up ring queue
         unsigned available_sqe = RINGSIZE - ctx.pending_cqe;
-        unsigned needed_sqe = MIN(RINGSIZE, (bytes_left / buf_size) + (bytes_left % buf_size != 0));
+        unsigned needed_sqe = MIN(RINGSIZE, (bytes_left / buf_size) + ((bytes_left % buf_size) != 0));
         if (needed_sqe > available_sqe)
         {
+            if (unsubmitted_sqe)
+            {
+                int ret = io_uring_submit(ctx.ring);
+                if (unlikely(ret < 0))
+                {
+                    fprintf(stderr, "io_uring_submit: %s\n", strerror(-ret));
+                    return false;
+                }
+            }
+            
             //! TODO: Maybe MIN(NUM_FREE_AT_ONCE, needed_sqe - available_sqe) will work better
             //!       or maybe MIN(pending_cqe, NUM_FREE_AT_ONCE)??
             int ret = handle_cqes(needed_sqe - available_sqe);
@@ -178,7 +196,7 @@ bool sparse_copy(int src_fd, int dest_fd, char **abuf, size_t buf_size,
             assert(sqe);
 
             // ssize_t n_read = read(src_fd, *abuf, MIN(max_n_read, buf_size));
-            io_uring_prep_read(sqe, src_fd, *abuf, bytes_to_read, -1);
+            io_uring_prep_read(sqe, src_fd, buf, bytes_to_read, -1);
             io_uring_sqe_set_data64(sqe, 1);
             sqe->flags = IOSQE_IO_LINK;
             total_n_read += bytes_to_read;
@@ -186,7 +204,7 @@ bool sparse_copy(int src_fd, int dest_fd, char **abuf, size_t buf_size,
 
             sqe = io_uring_get_sqe(ctx.ring);
             assert(sqe);
-            io_uring_prep_write(sqe, dest_fd, *abuf, bytes_to_read, -1);
+            io_uring_prep_write(sqe, dest_fd, buf, bytes_to_read, -1);
             io_uring_sqe_set_data64(sqe, 2);
             sqe->flags = IOSQE_IO_LINK;
             num_used++;
@@ -195,6 +213,7 @@ bool sparse_copy(int src_fd, int dest_fd, char **abuf, size_t buf_size,
         }
 
         //! Update state
+        unsubmitted_sqe = true;
         ctx.pending_cqe += num_used;
     }
     
@@ -223,7 +242,7 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
               mode_t dst_mode, mode_t omitted_permissions, bool& new_dst,
               const struct stat& src_sb)
 {
-    char* buf = NULL;
+    // char* buf = NULL;
     off_t n_read;
     bool return_val = true;
     int source_desc, dest_desc;
@@ -346,7 +365,7 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
     {
         buf_size = blcm;
     }
-    sparse_copy(source_desc, dest_desc, &buf, buf_size,
+    sparse_copy(source_desc, dest_desc, &(ctx.buf[0]), buf_size,
                 src_name, dst_name, src_open_sb.st_size, n_read, opt);
     //! TODO: --preserve timestamps, ownerships, xattr, author, acl
     //! TODO: remove extra permissions
