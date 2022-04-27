@@ -24,21 +24,50 @@
 #define CHMOD_MODE_BITS \
   (S_ISUID | S_ISGID | S_ISVTX | S_IRWXU | S_IRWXG | S_IRWXO)
 
-#define MIN(a, b) ((a < b) ? a : b)
-#define MAX(a, b) ((a > b) ? a : b)
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+#define MAX(a, b) (((a) > (b)) ? (a) : (b))
 
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
 
-#define RINGSIZE 20000
+//! Must be >= 2
+#define RINGSIZE 1 << 14
+
+//! Must be a multiple of 2
+#define MAX_OPEN_FILES 1000
 
 //! coreutils/cp.c hardcodes this to 128KiB
 enum { IO_BUFSIZE = 128 * 1024 };
 
 struct {
     struct io_uring* ring;
-    size_t pending_cqe;
+    unsigned pending_cqe;
+    std::vector<int> open_fds;
 } ctx;
+
+void close_all_files()
+{
+    for (auto i : ctx.open_fds)
+    {
+        close(i);
+    }
+    ctx.open_fds.clear();
+}
+
+int handle_cqes(unsigned num_cqes)
+{
+    assert(ctx.pending_cqe >= num_cqes);
+    struct io_uring_cqe* cqe;
+    int ret = io_uring_wait_cqe_nr(ctx.ring, &cqe, num_cqes);
+    if (unlikely(ret < 0))
+    {
+        fprintf(stderr, "io_uring_wait_cqe_nr: %s\n", strerror(-ret));
+        return ret;
+    }
+    //! TODO: Handle cqes
+    ctx.pending_cqe -= num_cqes;
+    return ret;
+}
 
 struct cp_options
 {
@@ -125,25 +154,48 @@ bool sparse_copy(int src_fd, int dest_fd, char **abuf, size_t buf_size,
     unsigned num_cqes = 0;
     while(bytes_left)
     {
-        size_t bytes_to_read = MIN(buf_size, bytes_left);
-        sqe = io_uring_get_sqe(ctx.ring);
-        assert(sqe);
+        //! Free up ring queue
+        unsigned available_sqe = RINGSIZE - ctx.pending_cqe;
+        unsigned needed_sqe = MIN(RINGSIZE, (bytes_left / buf_size) + (bytes_left % buf_size != 0));
+        if (needed_sqe > available_sqe)
+        {
+            //! TODO: Maybe MIN(NUM_FREE_AT_ONCE, needed_sqe - available_sqe) will work better
+            //!       or maybe MIN(pending_cqe, NUM_FREE_AT_ONCE)??
+            int ret = handle_cqes(needed_sqe - available_sqe);
+            if (unlikely(ret) < 0)
+            {
+                return false;
+            }
+            available_sqe = needed_sqe;
+        }
 
-        // ssize_t n_read = read(src_fd, *abuf, MIN(max_n_read, buf_size));
-        io_uring_prep_read(sqe, src_fd, *abuf, bytes_to_read, -1);
-        io_uring_sqe_set_data64(sqe, 1);
-        sqe->flags = IOSQE_IO_LINK;
-        total_n_read += bytes_to_read;
-        num_cqes++;
+        //! Queue RW requests
+        unsigned num_used = 0;
+        while ((num_used < available_sqe) && bytes_left)
+        {
+            size_t bytes_to_read = MIN(buf_size, bytes_left);
+            sqe = io_uring_get_sqe(ctx.ring);
+            assert(sqe);
 
-        sqe = io_uring_get_sqe(ctx.ring);
-        assert(sqe);
-        io_uring_prep_write(sqe, dest_fd, *abuf, bytes_to_read, -1);
-        io_uring_sqe_set_data64(sqe, 2);
-        sqe->flags = IOSQE_IO_LINK;
-        num_cqes++;
+            // ssize_t n_read = read(src_fd, *abuf, MIN(max_n_read, buf_size));
+            io_uring_prep_read(sqe, src_fd, *abuf, bytes_to_read, -1);
+            io_uring_sqe_set_data64(sqe, 1);
+            sqe->flags = IOSQE_IO_LINK;
+            total_n_read += bytes_to_read;
+            num_used++;
 
-        bytes_left -= bytes_to_read;
+            sqe = io_uring_get_sqe(ctx.ring);
+            assert(sqe);
+            io_uring_prep_write(sqe, dest_fd, *abuf, bytes_to_read, -1);
+            io_uring_sqe_set_data64(sqe, 2);
+            sqe->flags = IOSQE_IO_LINK;
+            num_used++;
+
+            bytes_left -= bytes_to_read;
+        }
+
+        //! Update state
+        ctx.pending_cqe += num_used;
     }
     
     int ret = io_uring_submit(ctx.ring);
@@ -153,16 +205,15 @@ bool sparse_copy(int src_fd, int dest_fd, char **abuf, size_t buf_size,
         return false;
     }
 
-    struct io_uring_cqe* cqe = NULL;
-    ret = io_uring_wait_cqe_nr(ctx.ring, &cqe, num_cqes);
+    // struct io_uring_cqe* cqe = NULL;
+    // ret = io_uring_wait_cqe_nr(ctx.ring, &cqe, num_cqes);
 
-    if (unlikely(ret < 0))
-    {
-        fprintf(stderr, "io_uring_wait_cqe_nr: %s\n", strerror(-ret));
-        return false;
-    }
+    // if (unlikely(ret < 0))
+    // {
+    //     fprintf(stderr, "io_uring_wait_cqe_nr: %s\n", strerror(-ret));
+    //     return false;
+    // }
     
-    //! TODO: Handle cqes
     return true;
 }
 
@@ -184,13 +235,18 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
     size_t buf_size, src_blk_size;
     size_t blcm_max, blcm;
 
+    //! # of open files shouldn't exceed `MAX_OPEN_FILES-2`
+    if (ctx.open_fds.size() > MAX_OPEN_FILES - 1)
+    {
+        handle_cqes(ctx.pending_cqe);
+        close_all_files();
+    }
     source_desc = open(src_name.c_str(), O_RDONLY);
     if (source_desc < 0)
     {
         fprintf(stderr, "cannot open %s for reading", src_name.c_str());
         return false;
     }
-
     if (fstat(source_desc, &src_open_sb) != 0)
     {
         fprintf(stderr, "cannot fstat %s", src_name.c_str());
@@ -297,24 +353,26 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
 
 
 close_src_and_dst_desc:
-    if (close(dest_desc) < 0)
-    {
-        fprintf(stderr, "failed to close %s", dst_name.c_str());
-        return_val = false;
-    }
+    ctx.open_fds.push_back(dest_desc);
+    // if (close(dest_desc) < 0)
+    // {
+    //     fprintf(stderr, "failed to close %s", dst_name.c_str());
+    //     return_val = false;
+    // }
 close_src_desc:
-    if (close(source_desc) < 0)
-    {
-        fprintf(stderr, "failed to close %s", src_name.c_str());
-        return_val = false;
-    }
+    ctx.open_fds.push_back(source_desc);
+    // if (close(source_desc) < 0)
+    // {
+    //     fprintf(stderr, "failed to close %s", src_name.c_str());
+    //     return_val = false;
+    // }
 
     /**
      * @note the reason why buf is allocated inside sparse_copy,
      *       but freed here is so that it can be reused when copying multiple
      *       blocks
      */
-    free(buf);
+    // free(buf);
     return return_val;
 }
 /**
@@ -590,6 +648,9 @@ int main(int argc, char** argv)
      * TODO: Add support for -t?
      * TODO: Add support for -T?
      */
+    
+    //! Init ctx
+    ctx.open_fds.reserve(MAX_OPEN_FILES);
 
     //! Init io_uring
     struct io_uring iou;
@@ -613,8 +674,17 @@ int main(int argc, char** argv)
     }
     bool ret = do_copy(result.unmatched(), cp_ops);
 
-    //! TODO: Handle cqe! !
+    //! Handle remaining cqe
+    int err = handle_cqes(ctx.pending_cqe);
+    if(unlikely(err < 0))
+    {
+        ret = false;
+    }
+
+    //! Exit io_uring
     io_uring_queue_exit(ctx.ring);
 
+    //! close all files
+    close_all_files();
     return ret ? EXIT_SUCCESS : EXIT_FAILURE;
 }

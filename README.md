@@ -20,3 +20,8 @@ mkdir build; cd build
 cmake ..
 make
 ```
+
+## Report
+
+1. Handle ringbuffer size
+2. handle max open files

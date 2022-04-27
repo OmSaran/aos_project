@@ -8,13 +8,13 @@ if [ $# -lt 2 ]; then
     exit 0
 fi
 
-if [ ! -x "$2" ]; then
-    echo "Program $2 not found" >&2
-    exit 1
-fi
+# if [ ! -x "$2" ]; then
+#     echo "Program $2 not found" >&2
+#     exit 1
+# fi
 
-FILENAME=".test"
-filecopy=".testcopy"
+FILENAME="_test"
+filecopy="_testcopy"
 
 if [ ! -f $FILENAME ]
 then
