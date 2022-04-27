@@ -34,9 +34,14 @@
 
 //! coreutils/cp.c hardcodes this to 128KiB
 enum { IO_BUFSIZE = 128 * 1024 };
+
+struct {
+    struct io_uring* ring;
+    size_t pending_cqe;
+} ctx;
+
 struct cp_options
 {
-    struct io_uring ring;
     bool recursive = false;
     bool kernel_poll = false;
     unsigned ktime = 60000;
@@ -118,11 +123,10 @@ bool sparse_copy(int src_fd, int dest_fd, char **abuf, size_t buf_size,
     struct io_uring_sqe* sqe;
     size_t bytes_left = filesize;
     unsigned num_cqes = 0;
-    struct io_uring* ring = &opt.ring;
     while(bytes_left)
     {
         size_t bytes_to_read = MIN(buf_size, bytes_left);
-        sqe = io_uring_get_sqe(ring);
+        sqe = io_uring_get_sqe(ctx.ring);
         assert(sqe);
 
         // ssize_t n_read = read(src_fd, *abuf, MIN(max_n_read, buf_size));
@@ -132,7 +136,7 @@ bool sparse_copy(int src_fd, int dest_fd, char **abuf, size_t buf_size,
         total_n_read += bytes_to_read;
         num_cqes++;
 
-        sqe = io_uring_get_sqe(ring);
+        sqe = io_uring_get_sqe(ctx.ring);
         assert(sqe);
         io_uring_prep_write(sqe, dest_fd, *abuf, bytes_to_read, -1);
         io_uring_sqe_set_data64(sqe, 2);
@@ -142,7 +146,7 @@ bool sparse_copy(int src_fd, int dest_fd, char **abuf, size_t buf_size,
         bytes_left -= bytes_to_read;
     }
     
-    int ret = io_uring_submit(ring);
+    int ret = io_uring_submit(ctx.ring);
     if (unlikely(ret < 0))
     {
         fprintf(stderr, "io_uring_submit: %s\n", strerror(-ret));
@@ -150,7 +154,7 @@ bool sparse_copy(int src_fd, int dest_fd, char **abuf, size_t buf_size,
     }
 
     struct io_uring_cqe* cqe = NULL;
-    ret = io_uring_wait_cqe_nr(ring, &cqe, num_cqes);
+    ret = io_uring_wait_cqe_nr(ctx.ring, &cqe, num_cqes);
 
     if (unlikely(ret < 0))
     {
@@ -549,8 +553,6 @@ bool do_copy(const std::vector<std::string>& args, cp_options& opt)
         }
     }
 
-    //! TODO: Copy multiple files to a directory
-
     return ok;
 }
 
@@ -590,17 +592,20 @@ int main(int argc, char** argv)
      */
 
     //! Init io_uring
+    struct io_uring iou;
+    ctx.ring = &iou;
+    
     struct io_uring_params params;
     memset(&params, 0, sizeof(io_uring_params));
-    // params.sq_entries = RINGSIZE;
-    // params.cq_entries = RINGSIZE * 2;
+
     //! TODO: Handle wakeup
     if (cp_ops.kernel_poll)
     {
         params.flags |= IORING_SETUP_SQPOLL;
         params.sq_thread_idle = cp_ops.ktime;
     }
-    int res = io_uring_queue_init_params(RINGSIZE, &cp_ops.ring, &params);
+
+    int res = io_uring_queue_init_params(RINGSIZE, ctx.ring, &params);
     if (res != 0)
     {
         fprintf(stderr, "failed to init io_uring queue (%s)\n", strerror(-res));
@@ -609,7 +614,7 @@ int main(int argc, char** argv)
     bool ret = do_copy(result.unmatched(), cp_ops);
 
     //! TODO: Handle cqe! !
-    io_uring_queue_exit(&cp_ops.ring);
+    io_uring_queue_exit(ctx.ring);
 
     return ret ? EXIT_SUCCESS : EXIT_FAILURE;
 }
