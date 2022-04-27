@@ -4,7 +4,7 @@
 echo "Sanity Checks"
 
 if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 <cp-executable> \"[opts]\"" >&2
+    echo "Usage: $0 <cp-executable> [opts]" >&2
     exit 1
 fi
 
@@ -13,7 +13,7 @@ if ! [ -x "$1" ]; then
     exit 1
 fi
 
-exec="$1"
+exec="${@:1}"
 if [ $# -eq 2 ]; then
     exec="$1 $2"
 fi

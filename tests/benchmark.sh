@@ -4,7 +4,7 @@
 
 
 if [ $# -lt 2 ]; then
-    echo "Usage: sudo ./benchmark.sh <size-in-MB> <cp-executable> \"[opts]\"" >&2
+    echo "Usage: sudo ./benchmark.sh <size-in-MB> <cp-executable> [opts]" >&2
     exit 0
 fi
 
@@ -40,9 +40,9 @@ fi
 echo "Clearing buffer cache"
 sync && echo 3 > /proc/sys/vm/drop_caches
 
-if [ $# -eq 3 ]
+if [ $# -ge 3 ]
 then
-    time "$2" "$3" $FILENAME $filecopy
+    time "$2" ${@:3} $FILENAME $filecopy
 else
     time "$2" $FILENAME $filecopy
 fi

@@ -30,6 +30,7 @@ enum { IO_BUFSIZE = 128 * 1024 };
 struct cp_options
 {
     bool recursive = false;
+    size_t buf_size = IO_BUFSIZE;
 };
 
 bool copy(const std::string& src_name, const std::string& dst_name, 
@@ -246,8 +247,8 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
     //! advise sequential read
     posix_fadvise(source_desc, 0, 0, POSIX_FADV_SEQUENTIAL);
 
-    buf_size = MIN(SIZE_MAX / 2UL + 1UL, (size_t)MAX(IO_BUFSIZE, sb.st_blksize));
-    src_blk_size = MIN(SIZE_MAX / 2UL + 1Ul, (size_t)MAX(IO_BUFSIZE, src_open_sb.st_blksize));
+    buf_size = MIN(SIZE_MAX / 2UL + 1UL, (size_t)MAX(opt.buf_size, sb.st_blksize));
+    src_blk_size = MIN(SIZE_MAX / 2UL + 1Ul, (size_t)MAX(opt.buf_size, src_open_sb.st_blksize));
     
     /* Compute the least common multiple of the input and output
        buffer sizes, adjusting for outlandish values.  */
@@ -544,6 +545,7 @@ int main(int argc, char** argv)
     options.allow_unrecognised_options();
     options.add_options()
     ("r,recursive", "copy files recursively", cxxopts::value<bool>()->default_value("false"))
+    ("b,buffersize", "size of buffer in KiB", cxxopts::value<size_t>())
     ("h,help", "Print usage");
 
     auto result = options.parse(argc, argv);
@@ -555,7 +557,10 @@ int main(int argc, char** argv)
 
     cp_options cp_ops;
     cp_ops.recursive = result["recursive"].as<bool>();
-
+    if (result.count("buffersize"))
+    {
+        cp_ops.buf_size = result["buffersize"].as<size_t>() * 1024;
+    }
     /**
      * Options not supported:
      * 1. -p: preserve perms

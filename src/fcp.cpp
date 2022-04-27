@@ -37,13 +37,14 @@
 #define MAX_OPEN_FILES 1000
 
 //! coreutils/cp.c hardcodes this to 128KiB
+//! We use this as the default bufsize
 enum { IO_BUFSIZE = 128 * 1024 };
 
 struct {
     struct io_uring* ring;
     unsigned pending_cqe;
     std::vector<int> open_fds;
-    char buf[IO_BUFSIZE];
+    char* buf;
 } ctx;
 
 void close_all_files()
@@ -78,6 +79,8 @@ struct cp_options
     bool recursive = false;
     bool kernel_poll = false;
     unsigned ktime = 60000;
+    size_t buf_size = IO_BUFSIZE;
+    size_t ring_size = RINGSIZE;
 };
 
 bool copy(const std::string& src_name, const std::string& dst_name, 
@@ -160,8 +163,8 @@ bool sparse_copy(int src_fd, int dest_fd, char *buf, size_t buf_size,
     while(bytes_left)
     {
         //! Free up ring queue
-        unsigned available_sqe = RINGSIZE - ctx.pending_cqe;
-        unsigned needed_sqe = MIN(RINGSIZE, (bytes_left / buf_size) + ((bytes_left % buf_size) != 0));
+        unsigned available_sqe = opt.ring_size - ctx.pending_cqe;
+        unsigned needed_sqe = MIN(opt.ring_size, (bytes_left / buf_size) + ((bytes_left % buf_size) != 0));
         if (needed_sqe > available_sqe)
         {
             if (unsubmitted_sqe)
@@ -338,8 +341,8 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
     //! advise sequential read
     posix_fadvise(source_desc, 0, 0, POSIX_FADV_SEQUENTIAL);
 
-    buf_size = MIN(SIZE_MAX / 2UL + 1UL, (size_t)MAX(IO_BUFSIZE, sb.st_blksize));
-    src_blk_size = MIN(SIZE_MAX / 2UL + 1Ul, (size_t)MAX(IO_BUFSIZE, src_open_sb.st_blksize));
+    buf_size = MIN(SIZE_MAX / 2UL + 1UL, (size_t)MAX(opt.buf_size, sb.st_blksize));
+    src_blk_size = MIN(SIZE_MAX / 2UL + 1Ul, (size_t)MAX(opt.buf_size, src_open_sb.st_blksize));
     
     /* Compute the least common multiple of the input and output
        buffer sizes, adjusting for outlandish values.  */
@@ -362,7 +365,7 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
     {
         buf_size = blcm;
     }
-    sparse_copy(source_desc, dest_desc, &(ctx.buf[0]), buf_size,
+    sparse_copy(source_desc, dest_desc, ctx.buf, buf_size,
                 src_name, dst_name, src_open_sb.st_size, n_read, opt);
     //! TODO: --preserve timestamps, ownerships, xattr, author, acl
     //! TODO: remove extra permissions
@@ -638,6 +641,8 @@ int main(int argc, char** argv)
     ("r,recursive", "copy files recursively", cxxopts::value<bool>()->default_value("false"))
     ("k,kpoll", "use kernel polling w/ io_uring", cxxopts::value<bool>()->default_value("false"))
     ("t,ktime", "kernel polling timeout", cxxopts::value<unsigned>()->default_value("60000"))
+    ("b,buffersize", "size of buffer in KiB", cxxopts::value<size_t>())
+    ("q,ringsize", "size of io_uring ring queue", cxxopts::value<size_t>())
     ("h,help", "Print usage");
 
     auto result = options.parse(argc, argv);
@@ -651,6 +656,14 @@ int main(int argc, char** argv)
     cp_ops.recursive = result["recursive"].as<bool>();
     cp_ops.kernel_poll = result["kpoll"].as<bool>();
     cp_ops.ktime = result["ktime"].as<unsigned>();
+    if (result.count("buffersize"))
+    {
+        cp_ops.buf_size = result["buffersize"].as<size_t>() * 1024;
+    }
+    if (result.count("ringsize"))
+    {
+        cp_ops.ring_size = result["ringsize"].as<size_t>();
+    }
     /**
      * Options not supported:
      * 1. -p: preserve perms
@@ -667,6 +680,7 @@ int main(int argc, char** argv)
     
     //! Init ctx
     ctx.open_fds.reserve(MAX_OPEN_FILES);
+    ctx.buf = (char *)aligned_alloc(getpagesize(), cp_ops.buf_size);
 
     //! Init io_uring
     struct io_uring iou;
@@ -682,7 +696,7 @@ int main(int argc, char** argv)
         params.sq_thread_idle = cp_ops.ktime;
     }
 
-    int res = io_uring_queue_init_params(RINGSIZE, ctx.ring, &params);
+    int res = io_uring_queue_init_params(cp_ops.ring_size, ctx.ring, &params);
     if (res != 0)
     {
         fprintf(stderr, "failed to init io_uring queue (%s)\n", strerror(-res));
