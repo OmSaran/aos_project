@@ -34,7 +34,7 @@
 #define RINGSIZE (1 << 14)
 
 //! Must be a multiple of 2
-#define MAX_OPEN_FILES 1000
+#define MAX_OPEN_FILES 50
 
 //! coreutils/cp.c hardcodes this to 128KiB
 //! We use this as the default bufsize
@@ -64,15 +64,6 @@ int handle_cqes(unsigned num_cqes)
     assert(ctx.pending_cqe >= num_cqes);
     struct io_uring_cqe* cqe;
 
-    // int ret = 0;
-    // for (int i = 0; i < num_cqes; i++)
-    // {
-    //     cqe = NULL;
-    //     io_uring_wait_cqe(ctx.ring, &cqe);
-    //     io_uring_cq_advance(ctx.ring, 1);
-    // }
-
-    // printf("Handled %u cqes\n", num_cqes);
     int ret = io_uring_wait_cqe_nr(ctx.ring, &cqe, num_cqes);
     if (unlikely(ret < 0))
     {
@@ -80,6 +71,8 @@ int handle_cqes(unsigned num_cqes)
         return ret;
     }
     //! TODO: Handle cqes
+    //! TODO: free buffer when a file is done
+    //!       "TAG" the last 'write' with buf ptr, and when that is detected, free the corresponding buffer!
 
     io_uring_cq_advance(ctx.ring, num_cqes);
     
@@ -648,12 +641,12 @@ bool do_copy(const std::vector<std::string>& args, cp_options& opt)
 
 int main(int argc, char** argv)
 {
-    cxxopts::Options options("cp", "barebones cp");
+    cxxopts::Options options("fcp", "fast cp");
     options.allow_unrecognised_options();
     options.add_options()
     ("r,recursive", "copy files recursively", cxxopts::value<bool>()->default_value("false"))
     ("k,kpoll", "use kernel polling w/ io_uring", cxxopts::value<bool>()->default_value("false"))
-    ("t,ktime", "kernel polling timeout", cxxopts::value<unsigned>()->default_value("60000"))
+    ("t,ktime", "kernel polling timeout", cxxopts::value<unsigned>()->default_value("5000"))
     ("b,buffersize", "total size of all buffers in KiB", cxxopts::value<size_t>())
     ("n,num_bufs", "number of buffers", cxxopts::value<int>())
     ("q,ringsize", "size of io_uring ring queue", cxxopts::value<size_t>())
@@ -709,7 +702,6 @@ int main(int argc, char** argv)
     struct io_uring_params params;
     memset(&params, 0, sizeof(io_uring_params));
 
-    //! TODO: Handle wakeup
     if (cp_ops.kernel_poll)
     {
         params.flags |= IORING_SETUP_SQPOLL;
