@@ -9,11 +9,21 @@
 #include <string.h>
 #include <fcntl.h>
 #include <assert.h>
+#include <time.h>
 #include <liburing.h>
 
 #define RING_SIZE 1024
 #define DIR_BUF_SIZE 65536
 #define RW_BUF_SIZE 128 * 1024
+#define BILLION 1000000000L
+
+
+struct timespec total_time;
+struct timespec setup_time;
+struct timespec src_open_time;
+struct timespec dst_open_time;
+struct timespec stat_time;
+struct timespec data_copy_time;
 
 struct io_uring ring;
 
@@ -21,10 +31,15 @@ using namespace std;
 
 #define IORING_OP_GETDENTS64 41
 static inline void io_uring_prep_getdents64(struct io_uring_sqe *sqe, int fd,
-					    void *buf, unsigned int count)
+					    void *buf, unsigned int count, long offset)
 {
-	io_uring_prep_rw(IORING_OP_GETDENTS64, sqe, fd, buf, count, 0);
+	io_uring_prep_rw(IORING_OP_GETDENTS64, sqe, fd, buf, count, offset);
 }
+
+void get_time(struct timespec *tp);
+struct timespec get_diff(struct timespec *start, struct timespec *end);
+void update_ts(struct timespec *target, struct timespec *diff);
+
 
 struct linux_dirent64 {
 	int64_t		d_ino;    /* 64-bit inode number */
@@ -39,10 +54,12 @@ private:
     struct io_uring ring;
     int size;
     int cqe_pending_tasks;
+    int max_open_files;
 public:
     IORing(ssize_t size) {
         this->size = size;
         this->cqe_pending_tasks = 0;
+        this->max_open_files = 1024;
         int ret = io_uring_queue_init(size, &ring, 0);
         assert(ret == 0);
     }
@@ -128,6 +145,7 @@ private:
     int dst_dir_fd;
     int size;
     int buf_size;
+    size_t dir_buf_size;
     IORing& ring;
 
     void open_dir() {
@@ -153,29 +171,48 @@ public:
     DirJob(filesystem::path src_path, filesystem::path dst_path, IORing& ioring, int bufsize)
         : dir_path{src_path}, dst_dir_path{dst_path}, ring{ioring}, buf_size{bufsize}
     {
-        this->dirent_buf.resize(DIR_BUF_SIZE);
+        this->dir_buf_size = DIR_BUF_SIZE; 
+        this->dirent_buf.resize(this->dir_buf_size);
         is_opened = false;
         dir_fetched = false;
     }
 
-    //! FIXME: Loop over this
     void fetch_dir() {
         if(!is_opened)
             open_dir();
 
         struct io_uring_sqe *sqe;
         struct io_uring_cqe *cqe;
+        int res;
+        int offset = 0;
 
         sqe = ring.get_sqe();
 
         assert(ring.num_cqe_pending_tasks() == 0);
 
-        io_uring_prep_getdents64(sqe, dir_fd, (void *)&dirent_buf[0], 65535);
+        io_uring_prep_getdents64(sqe, dir_fd, (void *)&dirent_buf[0], this->dir_buf_size, offset);
         ring.submit_and_wait(&cqe);
-
-        assert(cqe->res >= 0);
-        dirent_buf.resize(cqe->res);
+        res = cqe->res;
+        cout << "got " << res << " bytes in getdents" << endl;
+        assert(res >= 0);
         ring.see_cqe(cqe);
+        dirent_buf.resize(res);
+        
+        while(res != 0) {
+            dirent_buf.resize(dirent_buf.size() + this->dir_buf_size);
+
+            sqe = ring.get_sqe();
+
+            offset = dirent_buf.size()-this->dir_buf_size;
+
+            io_uring_prep_getdents64(sqe, dir_fd, (void *)&dirent_buf[offset], this->dir_buf_size, offset);
+            ring.submit_and_wait(&cqe);
+            res = cqe->res;
+            cout << "got " << res << " more bytes in getdents for offset " << offset << endl;
+            assert(res >= 0);
+            ring.see_cqe(cqe);
+            dirent_buf.resize(dirent_buf.size() - (this->dir_buf_size - res));
+        }
     }
 
     void do_stat(vector<CopyJobInfo>& copy_info) {
@@ -193,6 +230,7 @@ public:
             sqe = ring.get_sqe();
             //! TODO: Use the parent directory fd instead of -1 to
             io_uring_prep_statx(sqe, -1, info.src.c_str(), 0, STATX_SIZE, &info.st_buf);
+            // sqe->flags |= IOSQE_ASYNC;
             if(count != copy_info.size()-1) {
                 sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
             }
@@ -219,6 +257,7 @@ public:
             //! TODO: Add fadvise
             // cout<< "Opening source directory: " << info.src << endl;
             io_uring_prep_openat(sqe, -1, info.src.c_str(), O_RDONLY, 0);
+            // sqe->flags |= IOSQE_ASYNC;
             io_uring_sqe_set_data(sqe, (void *)idx);
 
             idx += 1;
@@ -253,6 +292,7 @@ public:
             //! TODO: Add fadvise
             // cout<< "Opening destination directory: " << info.dst << endl;
             io_uring_prep_openat(sqe, -1, info.dst.c_str(), O_CREAT | O_WRONLY, 0777);
+            // sqe->flags |= IOSQE_ASYNC;
             io_uring_sqe_set_data(sqe, (void *)idx);
 
             idx += 1;
@@ -298,11 +338,13 @@ public:
                 io_uring_prep_read(sqe, src_fd, buf, rw_size, size-remaining);
                 sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
                 sqe->flags |= IOSQE_IO_LINK;
+                // sqe->flags |= IOSQE_ASYNC;
                 
                 sqe = ring.get_sqe();
                 io_uring_prep_write(sqe, dst_fd, buf, rw_size, size-remaining);
                 sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
                 sqe->flags |= IOSQE_IO_LINK;
+                // sqe->flags |= IOSQE_ASYNC;
 
                 num += 2;
                 // If it is the last operation don't skip success -- we need to know when the last operation is completed.
@@ -352,15 +394,37 @@ public:
     //! WARNING: Assumes there are no other tasks running in ring
     void do_copy_files(vector<CopyJobInfo>& copy_info) {
         if(copy_info.size() == 0) return;
+        struct timespec tp1, tp2;
+        struct timespec diff;
 
         // cout<< "Doing stat: " << endl;
+        get_time(&tp1);
         do_stat(copy_info);
+        get_time(&tp2);
+        diff = get_diff(&tp1, &tp2);
+        update_ts(&stat_time, &diff);
+
         // cout<< "Doing src opens: " << endl;
+        get_time(&tp1);
         do_src_opens(copy_info);
+        get_time(&tp2);
+        diff = get_diff(&tp1, &tp2);
+        update_ts(&src_open_time, &diff);
+
+
         // cout<< "Doing dst opens: " << endl;
+        get_time(&tp1);
         do_dst_opens(copy_info);
+        get_time(&tp2);
+        diff = get_diff(&tp1, &tp2);
+        update_ts(&dst_open_time, &diff);
+
         // cout<< "Doing copies: " << endl;
+        get_time(&tp1);
         do_data_copy_serial_linked(copy_info);
+        get_time(&tp2);
+        diff = get_diff(&tp1, &tp2);
+        update_ts(&data_copy_time, &diff);
     }
 
     void do_create_dirs(vector<CopyJobInfo>& copy_info) {
@@ -437,6 +501,8 @@ public:
             bufp += dent->d_reclen;
         }
 
+        cout << "Num dirs: " << copy_dirs.size() << endl;
+
         do_copy_files(copy_files);
         do_create_dirs(copy_dirs);
 
@@ -444,13 +510,66 @@ public:
     }
 };
 
-int main() {
+void get_time(struct timespec *tp) {
+    int ret;
+    int sec;
+    long nsec;
+    ret = clock_gettime(CLOCK_MONOTONIC, tp);
+    tp->tv_sec += tp->tv_nsec / BILLION;
+    tp->tv_nsec = tp->tv_nsec % BILLION;
+    assert(ret == 0);
+}
+
+struct timespec get_diff(struct timespec *start, struct timespec *end) {
+    struct timespec sp;
+    sp.tv_nsec = end->tv_nsec - start->tv_nsec;
+    sp.tv_sec = end->tv_sec - start->tv_sec;
+
+    if(sp.tv_nsec < 0) {
+        sp.tv_sec -= 1;
+        sp.tv_nsec += BILLION;
+    }
+
+    return sp;
+}
+
+void update_ts(struct timespec *target, struct timespec *diff) {
+    target->tv_nsec += diff->tv_nsec;
+    target->tv_sec += diff->tv_sec;
+}
+
+void print_metric(struct timespec *ts, string metric) {
+    cout << metric << ": " << ts->tv_sec << " seconds and " << ts->tv_nsec << " nanoseconds" << endl;
+}
+
+void print_all_metrics() {
+    print_metric(&setup_time, "Setup");
+    print_metric(&src_open_time, "Opening source files");
+    print_metric(&stat_time, "Stat Time");
+    print_metric(&dst_open_time, "Destination source files");
+    print_metric(&data_copy_time, "Data Copy Time");
+}
+
+int main(int argc, char**argv) {
+    struct timespec tp1, tp2;
+    get_time(&tp1);
     IORing ring(RING_SIZE);
+    get_time(&tp2);
+
+    struct timespec diff = get_diff(&tp1, &tp2);
+
+    update_ts(&setup_time, &diff);
+
+    assert(argc == 3);
+
 
     queue<array<filesystem::path, 2>> q;
-    filesystem::path src_path = "/home/ubuntu/project/aos_project/tests/rootdir";
-    filesystem::path dst_path = "/home/ubuntu/project/aos_project/dst_dir";
+    filesystem::path src_path(argv[1]);
+    filesystem::path dst_path(argv[2]);
     mkdir(dst_path.c_str(), 0777);
+
+    cout << "src_path = " << src_path << endl;
+    cout << "dst_path = " << dst_path << endl;
 
     vector<array<filesystem::path, 2>> dirs;
     array<filesystem::path, 2> dir_val;
@@ -471,4 +590,6 @@ int main() {
         }
         q.pop();
     }
+
+    print_all_metrics();
 }
