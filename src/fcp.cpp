@@ -175,6 +175,7 @@ bool sparse_copy(int src_fd, int dest_fd, char *buf, size_t buf_size,
                     fprintf(stderr, "io_uring_submit: %s\n", strerror(-ret));
                     return false;
                 }
+                unsubmitted_sqe = false;
             }
             
             //! TODO: Maybe MIN(NUM_FREE_AT_ONCE, needed_sqe - available_sqe) will work better

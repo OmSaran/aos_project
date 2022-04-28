@@ -20,7 +20,8 @@
     - make benchmark scripts for multi-level file
         - use generator.py
 
-6. Dir. I: Allow "unlimited" memory
+6. Dir. I: Allow multiple buffers
+    - same memory footprint
 
 7. Dir. II: Descriptorless I/O
 
