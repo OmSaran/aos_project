@@ -1,6 +1,7 @@
 //! WARNING: Not thread safe
 #include <iostream>
 #include <vector>
+#include <queue>
 #include <array>
 #include <filesystem>
 
@@ -10,8 +11,9 @@
 #include <assert.h>
 #include <liburing.h>
 
-#define RING_SIZE 256
+#define RING_SIZE 1024
 #define DIR_BUF_SIZE 65536
+#define RW_BUF_SIZE 128 * 1024
 
 struct io_uring ring;
 
@@ -36,17 +38,21 @@ class IORing {
 private:
     struct io_uring ring;
     int size;
-    int running_tasks;
+    int cqe_pending_tasks;
 public:
     IORing(ssize_t size) {
         this->size = size;
-        this->running_tasks = 0;
+        this->cqe_pending_tasks = 0;
         int ret = io_uring_queue_init(size, &ring, 0);
         assert(ret == 0);
     }
 
-    int num_tasks_running() {
-        return running_tasks;
+    int ring_size() {
+        return size;
+    }
+
+    int num_cqe_pending_tasks() {
+        return cqe_pending_tasks;
     }
 
     io_uring_sqe* get_sqe() {
@@ -56,29 +62,44 @@ public:
         return sqe;
     }
 
-    io_uring_cqe* submit_and_wait() {
-        struct io_uring_cqe *cqe;
-        io_uring_submit_and_wait(&ring, 1);
-        io_uring_wait_cqe(&ring, &cqe);
+    // int submit(bool skip) {
+    //     io_uring_submit(&ring);
+    //     if(!skip)
+    //         cqe_pending_tasks += 1;
+    // }
 
-        return cqe;
+    int space_left() {
+        return io_uring_sq_space_left(&ring);
     }
 
-    void submit_and_wait_nr(int nr) {
-        int ret = io_uring_submit_and_wait(&ring, nr);
-        assert(ret == nr);
-        running_tasks += nr;
-    }
-
-    io_uring_cqe* get_cqe() {
-        struct io_uring_cqe *cqe;
+    void submit_and_wait(io_uring_cqe **cqe) {
         int ret;
 
-        ret = io_uring_wait_cqe(&ring, &cqe);
-        assert(ret == 0);
+        io_uring_submit_and_wait(&ring, 1);
+        ret = io_uring_wait_cqe(&ring, cqe);
 
-        running_tasks -= 1;
-        return cqe;
+        cqe_pending_tasks += 1;
+
+        assert(ret == 0);
+    }
+
+    void see_cqe(io_uring_cqe *cqe) {
+        io_uring_cqe_seen(&ring, cqe);
+
+        cqe_pending_tasks -= 1;
+    }
+
+    void submit_and_wait_nr(int nr, int num_skipped) {
+        int ret = io_uring_submit_and_wait(&ring, nr-num_skipped);
+        assert(ret == nr);
+        cqe_pending_tasks += (nr-num_skipped);
+    }
+
+    void get_cqe(io_uring_cqe **cqe) {
+        int ret;
+
+        ret = io_uring_wait_cqe(&ring, cqe);
+        assert(ret == 0);
     }
 };
 
@@ -99,10 +120,14 @@ class DirJob {
 private:
     vector<uint8_t> dirent_buf;
     filesystem::path dir_path;
+    filesystem::path dst_dir_path;
     bool is_opened;
     bool dir_fetched;
+    bool dst_created;
     int dir_fd;
+    int dst_dir_fd;
     int size;
+    int buf_size;
     IORing& ring;
 
     void open_dir() {
@@ -114,17 +139,23 @@ private:
 #ifdef FD_DIRECT
 #else
         io_uring_prep_openat(sqe, -1, dir_path.c_str(), O_DIRECTORY, 0);
-        cqe = ring.submit_and_wait();
-        assert(cqe->res >= 0);
+        ring.submit_and_wait(&cqe);
+        if(cqe->res < 0) {
+            cerr << "Failed to open directory: " << dir_path.c_str() << " : " << strerror(-cqe->res) << endl;
+            exit(1);
+        }
         dir_fd = cqe->res;
+        ring.see_cqe(cqe);
 #endif
     }
 
 public:
-    DirJob(filesystem::path d_path, IORing& ioring)
-        : dir_path{d_path}, ring{ioring}, is_opened{false}, dir_fetched{false}
+    DirJob(filesystem::path src_path, filesystem::path dst_path, IORing& ioring, int bufsize)
+        : dir_path{src_path}, dst_dir_path{dst_path}, ring{ioring}, buf_size{bufsize}
     {
         this->dirent_buf.resize(DIR_BUF_SIZE);
+        is_opened = false;
+        dir_fetched = false;
     }
 
     //! FIXME: Loop over this
@@ -136,103 +167,237 @@ public:
         struct io_uring_cqe *cqe;
 
         sqe = ring.get_sqe();
-        io_uring_prep_getdents64(sqe, dir_fd, (void *)&dirent_buf[0], dirent_buf.size());
-        cqe = ring.submit_and_wait();
+
+        assert(ring.num_cqe_pending_tasks() == 0);
+
+        io_uring_prep_getdents64(sqe, dir_fd, (void *)&dirent_buf[0], 65535);
+        ring.submit_and_wait(&cqe);
 
         assert(cqe->res >= 0);
         dirent_buf.resize(cqe->res);
+        ring.see_cqe(cqe);
     }
 
     void do_stat(vector<CopyJobInfo>& copy_info) {
         // batch all stats
         int num = 0;
         int ret;
+        int count = 0;
 
         struct io_uring_sqe *sqe;
         struct io_uring_cqe *cqe;
 
-        assert(ring.num_tasks_running() == 0);
+        assert(ring.num_cqe_pending_tasks() == 0);
 
         for(auto& info: copy_info) {
             sqe = ring.get_sqe();
             //! TODO: Use the parent directory fd instead of -1 to
             io_uring_prep_statx(sqe, -1, info.src.c_str(), 0, STATX_SIZE, &info.st_buf);
-            sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+            if(count != copy_info.size()-1) {
+                sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+            }
+            count += 1;
         }
-        ring.submit_and_wait_nr(copy_info.size());
+        ring.submit_and_wait(&cqe);
+        ring.see_cqe(cqe);
     }
 
     void do_src_opens(vector<CopyJobInfo>& copy_info) {
         // src file opens
         int num = 0;
-        int idx = 0;
+        long idx = 0;
         int ret;
 
         struct io_uring_sqe *sqe;
         struct io_uring_cqe *cqe;
 
-        assert(ring.num_tasks_running() == 0);
+        assert(ring.num_cqe_pending_tasks() == 0);
 
         for(auto& info: copy_info) {
             sqe = ring.get_sqe();
             //! TODO: Use the parent directory fd instead of -1 to
             //! TODO: Add fadvise
+            // cout<< "Opening source directory: " << info.src << endl;
             io_uring_prep_openat(sqe, -1, info.src.c_str(), O_RDONLY, 0);
             io_uring_sqe_set_data(sqe, (void *)idx);
 
             idx += 1;
         }
-        ring.submit_and_wait_nr(copy_info.size());
+        ring.submit_and_wait_nr(copy_info.size(), 0);
 
         for(int i=0; i<copy_info.size(); i++) {
-            cqe = ring.get_cqe();
+            ring.get_cqe(&cqe);
+            long index = (long)cqe->user_data;
+            // cout<< "index = " << index << endl;
             assert(cqe->res >= 0);
-            copy_info[(int)cqe->user_data].src_fd = cqe->res;
+            // cout<< "Opened source directory: " << copy_info[index].dst << "; with result = " << cqe->res << endl;
+            copy_info[index].src_fd = cqe->res;
+            ring.see_cqe(cqe);
         }
     }
 
     void do_dst_opens(vector<CopyJobInfo>& copy_info) {
         // src file opens
         int num = 0;
+        long idx = 0;
+        int ret;
+
+        struct io_uring_sqe *sqe;
+        struct io_uring_cqe *cqe;
+
+        assert(ring.num_cqe_pending_tasks() == 0);
+
+        for(auto& info: copy_info) {
+            sqe = ring.get_sqe();
+            //! TODO: Use the parent directory fd instead of -1 to
+            //! TODO: Add fadvise
+            // cout<< "Opening destination directory: " << info.dst << endl;
+            io_uring_prep_openat(sqe, -1, info.dst.c_str(), O_CREAT | O_WRONLY, 0777);
+            io_uring_sqe_set_data(sqe, (void *)idx);
+
+            idx += 1;
+        }
+        ring.submit_and_wait_nr(copy_info.size(), 0);
+
+        for(int i=0; i<copy_info.size(); i++) {
+            ring.get_cqe(&cqe);
+            long index = (long)cqe->user_data;
+            // cout<< "index = " << index << endl;
+            assert(cqe->res >= 0);
+            // cout<< "Opened destination directory: " << copy_info[index].dst << "; with result = " << cqe->res << endl;
+            copy_info[index].dst_fd = cqe->res;
+            ring.see_cqe(cqe);
+        }
+    }
+
+    void do_data_copy_serial_linked(vector<CopyJobInfo>& copy_info) {
+        void *buf = malloc(buf_size);
+
+        int num = 0;
         int idx = 0;
         int ret;
 
         struct io_uring_sqe *sqe;
         struct io_uring_cqe *cqe;
 
-        assert(ring.num_tasks_running() == 0);
-
-        for(auto& info: copy_info) {
-            sqe = ring.get_sqe();
-            //! TODO: Use the parent directory fd instead of -1 to
-            //! TODO: Add fadvise
-            io_uring_prep_openat(sqe, -1, info.dst.c_str(), O_WRONLY, 0);
-            io_uring_sqe_set_data(sqe, (void *)idx);
-
-            idx += 1;
-        }
-        ring.submit_and_wait_nr(copy_info.size());
+        assert(ring.num_cqe_pending_tasks() == 0);
 
         for(int i=0; i<copy_info.size(); i++) {
-            cqe = ring.get_cqe();
-            assert(cqe->res >= 0);
-            copy_info[(int)cqe->user_data].dst_fd = cqe->res;
-        }
-    }
+            size_t size = copy_info[i].st_buf.stx_size;
+            size_t remaining = size;
 
-    void do_data_copy_serial_linked(vector<CopyJobInfo>& copy_info) {
-        
+            int src_fd = copy_info[i].src_fd;
+            int dst_fd = copy_info[i].dst_fd;
+
+            // cout<< "Copying the file: " << copy_info[i].src << "; size = " << copy_info[i].st_buf.stx_size << "; src_fd = " << src_fd << "; dst_fd = " << dst_fd << endl;
+
+            while(remaining > 0) {
+                int rw_size = remaining < buf_size ? remaining : buf_size;
+
+                sqe = ring.get_sqe();
+                io_uring_prep_read(sqe, src_fd, buf, rw_size, size-remaining);
+                sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+                sqe->flags |= IOSQE_IO_LINK;
+                
+                sqe = ring.get_sqe();
+                io_uring_prep_write(sqe, dst_fd, buf, rw_size, size-remaining);
+                sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+                sqe->flags |= IOSQE_IO_LINK;
+
+                num += 2;
+                // If it is the last operation don't skip success -- we need to know when the last operation is completed.
+                if(i == (copy_info.size()-1) && (remaining - rw_size) == 0) {
+                    // cout<< "Last op in copying files" << endl;
+                    sqe->flags &= ~(IOSQE_CQE_SKIP_SUCCESS);
+                    sqe->flags &= ~(IOSQE_IO_LINK);
+                }
+                else if (ring.ring_size() - num <= 2) {
+                    // // cout<< "Running out of space! " << endl;
+                    sqe->flags &= ~(IOSQE_CQE_SKIP_SUCCESS);
+                    sqe->flags &= ~(IOSQE_IO_LINK);
+
+                    int num_submitted = num;
+                    int num_skipped = num-1;
+
+                    ring.submit_and_wait_nr(num_submitted, num_skipped);
+                    ring.get_cqe(&cqe);
+                    if(cqe->res < 0) {
+                        cerr << "Failed in rw: " << strerror(cqe->res) << endl;
+                        exit(1);
+                    }
+
+                    for(int j=0; j<num_submitted-num_skipped; j++) {
+                        ring.see_cqe(cqe);
+                    }
+
+                    // // cout<< "ring.space_left() after clearing " <<  ring.space_left() << endl;
+                    num = 0;
+                } else {
+                    // // cout<< "ring.space_left() " <<  ring.space_left() << endl;
+                }
+
+                remaining -= rw_size;
+            }
+        }        
+
+        ring.submit_and_wait(&cqe);
+        if(cqe->res < 0) {
+            cerr << "Failed in rw after last op: " << strerror(cqe->res) << endl;
+            exit(1);
+        }
+        assert(cqe->res >= 0);
+        ring.see_cqe(cqe);
     }
 
     //! WARNING: Assumes there are no other tasks running in ring
     void do_copy_files(vector<CopyJobInfo>& copy_info) {
+        if(copy_info.size() == 0) return;
+
+        // cout<< "Doing stat: " << endl;
         do_stat(copy_info);
+        // cout<< "Doing src opens: " << endl;
         do_src_opens(copy_info);
+        // cout<< "Doing dst opens: " << endl;
         do_dst_opens(copy_info);
+        // cout<< "Doing copies: " << endl;
         do_data_copy_serial_linked(copy_info);
     }
 
-    vector<filesystem::path> copy_dir_files(filesystem::path dst_path) {
+    void do_create_dirs(vector<CopyJobInfo>& copy_info) {
+        // cout<< "Doing create dest dirs: " << endl;
+
+        struct io_uring_sqe *sqe;
+        struct io_uring_cqe *cqe;
+
+        assert(ring.num_cqe_pending_tasks() == 0);
+
+        if(copy_info.size() == 0) return;
+
+        for(int i=0; i<copy_info.size(); i++) {
+            CopyJobInfo& info = copy_info[i];
+
+            sqe = ring.get_sqe();
+            //! TODO: Use the parent directory fd instead of -1 to
+            // cout<< "Creating destination directory: " << info.dst << endl;
+            io_uring_prep_mkdirat(sqe, -1, info.dst.c_str(), 0777);
+            if(i != copy_info.size()-1){
+                sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+            }
+        }
+        ring.submit_and_wait_nr(copy_info.size(), copy_info.size()-1);
+
+        ring.get_cqe(&cqe);
+        assert(cqe->res >= 0);
+        ring.see_cqe(cqe);
+    }
+
+    void create_dest_dir() {
+        // cout<< "Creating destination directory: " << dst_dir_path << endl;
+        dst_dir_fd = mkdir(dst_dir_path.c_str(), 0777);
+    }
+
+    vector<array<filesystem::path, 2>> copy_dir_files() {
+        create_dest_dir();
         if(!dir_fetched)
             fetch_dir();
 
@@ -244,7 +409,7 @@ public:
         bufp = (uint8_t *)&dirent_buf[0];
         end = bufp + dirent_buf.size();
 
-        vector<filesystem::path> directories;
+        vector<array<filesystem::path, 2>> directories;
         vector<CopyJobInfo> copy_files;
         vector<CopyJobInfo> copy_dirs;
 
@@ -255,7 +420,8 @@ public:
             if (strcmp(dent->d_name, ".") && strcmp(dent->d_name, "..")) {
                 // Create copy jobs;
                 src_path = dir_path / dent->d_name;
-                dst_path = dst_path / dent->d_name;
+                dst_path = this->dst_dir_path / dent->d_name;
+                // cout<< "Read the following dentry: " << src_path << endl;
                 if(dent->d_type == DT_REG) {
                     // copy the files
                     CopyJobInfo info(src_path, dst_path);
@@ -265,13 +431,14 @@ public:
                     // create the directories
                     CopyJobInfo info(src_path, dst_path);
                     copy_dirs.push_back(info);
-                    directories.push_back(src_path);
+                    directories.push_back({src_path, dst_path});
                 }
             }
             bufp += dent->d_reclen;
         }
 
         do_copy_files(copy_files);
+        do_create_dirs(copy_dirs);
 
         return directories;
     }
@@ -279,4 +446,29 @@ public:
 
 int main() {
     IORing ring(RING_SIZE);
+
+    queue<array<filesystem::path, 2>> q;
+    filesystem::path src_path = "/home/ubuntu/project/aos_project/tests/rootdir";
+    filesystem::path dst_path = "/home/ubuntu/project/aos_project/dst_dir";
+    mkdir(dst_path.c_str(), 0777);
+
+    vector<array<filesystem::path, 2>> dirs;
+    array<filesystem::path, 2> dir_val;
+    // vector<array<filesystem::path, 2>> new_dirs;
+
+    DirJob job(src_path, dst_path, ring, DIR_BUF_SIZE);
+    dirs = job.copy_dir_files();
+
+    for(auto& dir: dirs) {
+        q.push(dir);
+    }
+
+    while(q.size() > 0) {
+        dir_val = q.front();
+
+        for(auto& dir: DirJob(dir_val[0], dir_val[1], ring, DIR_BUF_SIZE).copy_dir_files()) {
+            q.push(dir);
+        }
+        q.pop();
+    }
 }
