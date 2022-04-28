@@ -2,7 +2,6 @@
 
 # Must run w/ root-privileges
 
-set -x #echo on
 if [ $# -lt 3 ]; then
     echo "Usage: sudo ./benchmark.sh <size-in-MB> <num-files> <cp-executable> [opts]" >&2
     exit 0
