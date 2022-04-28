@@ -164,7 +164,7 @@ bool sparse_copy(int src_fd, int dest_fd, char *buf, size_t buf_size,
     {
         //! Free up ring queue
         unsigned available_sqe = opt.ring_size - ctx.pending_cqe;
-        unsigned needed_sqe = MIN(opt.ring_size, (bytes_left / buf_size) + ((bytes_left % buf_size) != 0));
+        unsigned needed_sqe = MIN(opt.ring_size, 2 * ((bytes_left / buf_size) + ((bytes_left % buf_size) != 0)));
         if (needed_sqe > available_sqe)
         {
             if (unsubmitted_sqe)
@@ -342,31 +342,31 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
     //! advise sequential read
     posix_fadvise(source_desc, 0, 0, POSIX_FADV_SEQUENTIAL);
 
-    buf_size = MIN(SIZE_MAX / 2UL + 1UL, (size_t)MAX(opt.buf_size, sb.st_blksize));
-    src_blk_size = MIN(SIZE_MAX / 2UL + 1Ul, (size_t)MAX(opt.buf_size, src_open_sb.st_blksize));
+    // buf_size = MIN(SIZE_MAX / 2UL + 1UL, (size_t)MAX(opt.buf_size, sb.st_blksize));
+    // src_blk_size = MIN(SIZE_MAX / 2UL + 1Ul, (size_t)MAX(opt.buf_size, src_open_sb.st_blksize));
     
-    /* Compute the least common multiple of the input and output
-       buffer sizes, adjusting for outlandish values.  */
-    blcm_max = SIZE_MAX;
-    blcm = buffer_lcm(src_blk_size, buf_size, blcm_max);
+    // /* Compute the least common multiple of the input and output
+    //    buffer sizes, adjusting for outlandish values.  */
+    // blcm_max = SIZE_MAX;
+    // blcm = buffer_lcm(src_blk_size, buf_size, blcm_max);
 
-    /* Do not bother with a buffer larger than the input file, plus one
-       byte to make sure the file has not grown while reading it.  */
-    if (S_ISREG (src_open_sb.st_mode) && (size_t)src_open_sb.st_size < buf_size)
-    {
-        buf_size = src_open_sb.st_size + 1;
-    }
+    // /* Do not bother with a buffer larger than the input file, plus one
+    //    byte to make sure the file has not grown while reading it.  */
+    // if (S_ISREG (src_open_sb.st_mode) && (size_t)src_open_sb.st_size < buf_size)
+    // {
+    //     buf_size = src_open_sb.st_size + 1;
+    // }
 
-    /* However, stick with a block size that is a positive multiple of
-       blcm, overriding the above adjustments.  Watch out for
-       overflow.  */
-    buf_size += blcm - 1;
-    buf_size -= buf_size % blcm;
-    if (buf_size == 0 || blcm_max < buf_size)
-    {
-        buf_size = blcm;
-    }
-    sparse_copy(source_desc, dest_desc, ctx.buf, buf_size,
+    // /* However, stick with a block size that is a positive multiple of
+    //    blcm, overriding the above adjustments.  Watch out for
+    //    overflow.  */
+    // buf_size += blcm - 1;
+    // buf_size -= buf_size % blcm;
+    // if (buf_size == 0 || blcm_max < buf_size)
+    // {
+    //     buf_size = blcm;
+    // }
+    sparse_copy(source_desc, dest_desc, ctx.buf, opt.buf_size,
                 src_name, dst_name, src_open_sb.st_size, n_read, opt);
     //! TODO: --preserve timestamps, ownerships, xattr, author, acl
     //! TODO: remove extra permissions
