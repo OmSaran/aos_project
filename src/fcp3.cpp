@@ -1,3 +1,4 @@
+//! WARNING: Not thread safe
 #include <iostream>
 #include <vector>
 #include <array>
@@ -34,10 +35,18 @@ struct linux_dirent64 {
 class IORing {
 private:
     struct io_uring ring;
+    int size;
+    int running_tasks;
 public:
     IORing(ssize_t size) {
-        int ret = io_uring_queue_init(RING_SIZE, &ring, 0);
+        this->size = size;
+        this->running_tasks = 0;
+        int ret = io_uring_queue_init(size, &ring, 0);
         assert(ret == 0);
+    }
+
+    int num_tasks_running() {
+        return running_tasks;
     }
 
     io_uring_sqe* get_sqe() {
@@ -54,6 +63,23 @@ public:
 
         return cqe;
     }
+
+    void submit_and_wait_nr(int nr) {
+        int ret = io_uring_submit_and_wait(&ring, nr);
+        assert(ret == nr);
+        running_tasks += nr;
+    }
+
+    io_uring_cqe* get_cqe() {
+        struct io_uring_cqe *cqe;
+        int ret;
+
+        ret = io_uring_wait_cqe(&ring, &cqe);
+        assert(ret == 0);
+
+        running_tasks -= 1;
+        return cqe;
+    }
 };
 
 class CopyJobInfo {
@@ -62,6 +88,7 @@ public:
     filesystem::path dst;
     int src_fd;
     int dst_fd;
+    struct statx st_buf;
 
     CopyJobInfo(filesystem::path src_path, filesystem::path dst_path) 
         : src{src_path}, dst{dst_path}
@@ -118,9 +145,91 @@ public:
 
     void do_stat(vector<CopyJobInfo>& copy_info) {
         // batch all stats
+        int num = 0;
+        int ret;
+
+        struct io_uring_sqe *sqe;
+        struct io_uring_cqe *cqe;
+
+        assert(ring.num_tasks_running() == 0);
+
+        for(auto& info: copy_info) {
+            sqe = ring.get_sqe();
+            //! TODO: Use the parent directory fd instead of -1 to
+            io_uring_prep_statx(sqe, -1, info.src.c_str(), 0, STATX_SIZE, &info.st_buf);
+            sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+        }
+        ring.submit_and_wait_nr(copy_info.size());
     }
 
+    void do_src_opens(vector<CopyJobInfo>& copy_info) {
+        // src file opens
+        int num = 0;
+        int idx = 0;
+        int ret;
+
+        struct io_uring_sqe *sqe;
+        struct io_uring_cqe *cqe;
+
+        assert(ring.num_tasks_running() == 0);
+
+        for(auto& info: copy_info) {
+            sqe = ring.get_sqe();
+            //! TODO: Use the parent directory fd instead of -1 to
+            //! TODO: Add fadvise
+            io_uring_prep_openat(sqe, -1, info.src.c_str(), O_RDONLY, 0);
+            io_uring_sqe_set_data(sqe, (void *)idx);
+
+            idx += 1;
+        }
+        ring.submit_and_wait_nr(copy_info.size());
+
+        for(int i=0; i<copy_info.size(); i++) {
+            cqe = ring.get_cqe();
+            assert(cqe->res >= 0);
+            copy_info[(int)cqe->user_data].src_fd = cqe->res;
+        }
+    }
+
+    void do_dst_opens(vector<CopyJobInfo>& copy_info) {
+        // src file opens
+        int num = 0;
+        int idx = 0;
+        int ret;
+
+        struct io_uring_sqe *sqe;
+        struct io_uring_cqe *cqe;
+
+        assert(ring.num_tasks_running() == 0);
+
+        for(auto& info: copy_info) {
+            sqe = ring.get_sqe();
+            //! TODO: Use the parent directory fd instead of -1 to
+            //! TODO: Add fadvise
+            io_uring_prep_openat(sqe, -1, info.dst.c_str(), O_WRONLY, 0);
+            io_uring_sqe_set_data(sqe, (void *)idx);
+
+            idx += 1;
+        }
+        ring.submit_and_wait_nr(copy_info.size());
+
+        for(int i=0; i<copy_info.size(); i++) {
+            cqe = ring.get_cqe();
+            assert(cqe->res >= 0);
+            copy_info[(int)cqe->user_data].dst_fd = cqe->res;
+        }
+    }
+
+    void do_data_copy_serial_linked(vector<CopyJobInfo>& copy_info) {
+        
+    }
+
+    //! WARNING: Assumes there are no other tasks running in ring
     void do_copy_files(vector<CopyJobInfo>& copy_info) {
+        do_stat(copy_info);
+        do_src_opens(copy_info);
+        do_dst_opens(copy_info);
+        do_data_copy_serial_linked(copy_info);
     }
 
     vector<filesystem::path> copy_dir_files(filesystem::path dst_path) {
