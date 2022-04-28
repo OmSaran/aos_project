@@ -44,7 +44,9 @@ struct {
     struct io_uring* ring;
     unsigned pending_cqe;
     std::vector<int> open_fds;
-    char* buf;
+    unsigned page_size;
+    BufferManager buf_mgr;
+    // char* buf;
 } ctx;
 
 void close_all_files()
@@ -58,8 +60,19 @@ void close_all_files()
 
 int handle_cqes(unsigned num_cqes)
 {
+    if (num_cqes == 0) return 0;
     assert(ctx.pending_cqe >= num_cqes);
     struct io_uring_cqe* cqe;
+
+    // int ret = 0;
+    // for (int i = 0; i < num_cqes; i++)
+    // {
+    //     cqe = NULL;
+    //     io_uring_wait_cqe(ctx.ring, &cqe);
+    //     io_uring_cq_advance(ctx.ring, 1);
+    // }
+
+    // printf("Handled %u cqes\n", num_cqes);
     int ret = io_uring_wait_cqe_nr(ctx.ring, &cqe, num_cqes);
     if (unlikely(ret < 0))
     {
@@ -80,6 +93,7 @@ struct cp_options
     bool kernel_poll = false;
     unsigned ktime = 60000;
     size_t buf_size = IO_BUFSIZE;
+    int num_bufs = 2;
     size_t ring_size = RINGSIZE;
 };
 
@@ -188,6 +202,7 @@ bool sparse_copy(int src_fd, int dest_fd, char *buf, size_t buf_size,
             available_sqe = needed_sqe;
         }
 
+        // handle_cqes(ctx.pending_cqe);
         //! Queue RW requests
         unsigned num_used = 0;
         while ((num_used < available_sqe) && bytes_left)
@@ -199,7 +214,7 @@ bool sparse_copy(int src_fd, int dest_fd, char *buf, size_t buf_size,
             // ssize_t n_read = read(src_fd, *abuf, MIN(max_n_read, buf_size));
             io_uring_prep_read(sqe, src_fd, buf, bytes_to_read, -1);
             io_uring_sqe_set_data64(sqe, 1);
-            sqe->flags = IOSQE_IO_LINK;
+            sqe->flags |= IOSQE_IO_LINK;
             total_n_read += bytes_to_read;
             num_used++;
 
@@ -207,7 +222,7 @@ bool sparse_copy(int src_fd, int dest_fd, char *buf, size_t buf_size,
             assert(sqe);
             io_uring_prep_write(sqe, dest_fd, buf, bytes_to_read, -1);
             io_uring_sqe_set_data64(sqe, 2);
-            sqe->flags = IOSQE_IO_LINK;
+            sqe->flags |= IOSQE_IO_LINK;
             num_used++;
 
             bytes_left -= bytes_to_read;
@@ -224,15 +239,6 @@ bool sparse_copy(int src_fd, int dest_fd, char *buf, size_t buf_size,
         fprintf(stderr, "io_uring_submit: %s\n", strerror(-ret));
         return false;
     }
-
-    // struct io_uring_cqe* cqe = NULL;
-    // ret = io_uring_wait_cqe_nr(ctx.ring, &cqe, num_cqes);
-
-    // if (unlikely(ret < 0))
-    // {
-    //     fprintf(stderr, "io_uring_wait_cqe_nr: %s\n", strerror(-ret));
-    //     return false;
-    // }
     
     return true;
 }
@@ -243,7 +249,7 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
               mode_t dst_mode, mode_t omitted_permissions, bool& new_dst,
               const struct stat& src_sb)
 {
-    // char* buf = NULL;
+    char* buf = NULL;
     off_t n_read;
     bool return_val = true;
     int source_desc, dest_desc;
@@ -366,7 +372,14 @@ bool copy_reg(const std::string& src_name, const std::string& dst_name,
     // {
     //     buf_size = blcm;
     // }
-    sparse_copy(source_desc, dest_desc, ctx.buf, opt.buf_size,
+    buf = ctx.buf_mgr.get_next_buf();
+    if (buf == NULL)
+    {
+        handle_cqes(ctx.pending_cqe);
+        ctx.buf_mgr.free_all();
+        buf = ctx.buf_mgr.get_next_buf();
+    }
+    sparse_copy(source_desc, dest_desc, buf, opt.buf_size,
                 src_name, dst_name, src_open_sb.st_size, n_read, opt);
     //! TODO: --preserve timestamps, ownerships, xattr, author, acl
     //! TODO: remove extra permissions
@@ -392,7 +405,6 @@ close_src_desc:
      *       but freed here is so that it can be reused when copying multiple
      *       blocks
      */
-    // free(buf);
     return return_val;
 }
 /**
@@ -642,7 +654,8 @@ int main(int argc, char** argv)
     ("r,recursive", "copy files recursively", cxxopts::value<bool>()->default_value("false"))
     ("k,kpoll", "use kernel polling w/ io_uring", cxxopts::value<bool>()->default_value("false"))
     ("t,ktime", "kernel polling timeout", cxxopts::value<unsigned>()->default_value("60000"))
-    ("b,buffersize", "size of buffer in KiB", cxxopts::value<size_t>())
+    ("b,buffersize", "total size of all buffers in KiB", cxxopts::value<size_t>())
+    ("n,num_bufs", "number of buffers", cxxopts::value<int>())
     ("q,ringsize", "size of io_uring ring queue", cxxopts::value<size_t>())
     ("h,help", "Print usage");
 
@@ -657,9 +670,14 @@ int main(int argc, char** argv)
     cp_ops.recursive = result["recursive"].as<bool>();
     cp_ops.kernel_poll = result["kpoll"].as<bool>();
     cp_ops.ktime = result["ktime"].as<unsigned>();
+
+    if (result.count("num_bufs"))
+    {
+        cp_ops.num_bufs = result["num_bufs"].as<int>();
+    }
     if (result.count("buffersize"))
     {
-        cp_ops.buf_size = result["buffersize"].as<size_t>() * 1024;
+        cp_ops.buf_size = result["buffersize"].as<size_t>() * 1024 / cp_ops.num_bufs;
     }
     if (result.count("ringsize"))
     {
@@ -680,8 +698,9 @@ int main(int argc, char** argv)
      */
     
     //! Init ctx
+    ctx.buf_mgr.init(cp_ops.num_bufs, cp_ops.buf_size);
     ctx.open_fds.reserve(MAX_OPEN_FILES);
-    ctx.buf = (char *)aligned_alloc(getpagesize(), cp_ops.buf_size);
+    ctx.page_size = getpagesize();
 
     //! Init io_uring
     struct io_uring iou;
