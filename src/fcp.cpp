@@ -62,19 +62,31 @@ int handle_cqes(unsigned num_cqes)
 {
     if (num_cqes == 0) return 0;
     assert(ctx.pending_cqe >= num_cqes);
-    struct io_uring_cqe* cqe;
-
-    int ret = io_uring_wait_cqe_nr(ctx.ring, &cqe, num_cqes);
-    if (unlikely(ret < 0))
+    struct io_uring_cqe* cqe = NULL;
+    int ret = 0;
+    
+    int remaining = num_cqes;
+    while (remaining > 0)
     {
-        fprintf(stderr, "io_uring_wait_cqe_nr: %s\n", strerror(-ret));
-        return ret;
+        io_uring_peek_cqe(ctx.ring, &cqe);
+        if (cqe)
+        {
+            io_uring_cq_advance(ctx.ring, 1);
+            cqe = NULL;
+            remaining--;
+        }
     }
-    //! TODO: Handle cqes
-    //! TODO: free buffer when a file is done
-    //!       "TAG" the last 'write' with buf ptr, and when that is detected, free the corresponding buffer!
+    // int ret = io_uring_wait_cqe_nr(ctx.ring, &cqe, num_cqes);
+    // assert(cqe);
+    // if (unlikely(ret < 0))
+    // {
+    //     fprintf(stderr, "io_uring_wait_cqe_nr: %s\n", strerror(-ret));
+    //     return ret;
+    // }
+    // //! TODO: Handle cqes
+    // //! TODO: free buffer when a file is done
+    // //!       "TAG" the last 'write' with buf ptr, and when that is detected, free the corresponding buffer!
 
-    io_uring_cq_advance(ctx.ring, num_cqes);
     
     ctx.pending_cqe -= num_cqes;
     return ret;
@@ -646,7 +658,7 @@ int main(int argc, char** argv)
     options.add_options()
     ("r,recursive", "copy files recursively", cxxopts::value<bool>()->default_value("false"))
     ("k,kpoll", "use kernel polling w/ io_uring", cxxopts::value<bool>()->default_value("false"))
-    ("t,ktime", "kernel polling timeout", cxxopts::value<unsigned>()->default_value("5000"))
+    ("t,ktime", "kernel polling timeout", cxxopts::value<unsigned>()->default_value("60000"))
     ("b,buffersize", "total size of all buffers in KiB", cxxopts::value<size_t>())
     ("n,num_bufs", "number of buffers", cxxopts::value<int>())
     ("q,ringsize", "size of io_uring ring queue", cxxopts::value<size_t>())
