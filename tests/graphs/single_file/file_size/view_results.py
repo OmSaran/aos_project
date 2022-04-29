@@ -21,6 +21,7 @@ def plot(path):
     fcp_x = [x/1024 for x in results['fcp']['size']]
     fcp_y = [x/1024 for x in results['fcp']['time']]
 
+    #! TODO: Add x, y axes labels
     plt.plot(cp_x, cp_y, fcp_x, fcp_y)
     plt.show()
 
