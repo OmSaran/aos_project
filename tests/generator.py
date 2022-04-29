@@ -1,3 +1,5 @@
+#!/usr/bin/python3
+
 import argparse
 import os
 import sys
@@ -27,11 +29,11 @@ def get_parser():
     return parser
 
 class DirCreator:
-    def __init__(self):
+    def __init__(self, root_dir_path='rootdir'):
         self._count = 0
         self._dir_prefix = 'dir'
         self._file_prefix = 'file'
-        self._root_dir_name = 'rootdir'
+        self._root_dir_path = root_dir_path
 
     def _create_file(self, file_path: str, file_size_range: (int, int)):
         with open(file_path, 'wb') as fh:
@@ -54,11 +56,11 @@ class DirCreator:
         return dirs
 
     def create(self, depth, breadth, num_files, file_size_range):
-        os.mkdir(self._root_dir_name)
+        os.mkdir(self._root_dir_path)
         skip_dirs = False
         if depth == 1:
             skip_dirs = True
-        dirs = self._create_dir_and_files(self._root_dir_name, breadth, num_files, file_size_range, skip_dirs)
+        dirs = self._create_dir_and_files(self._root_dir_path, breadth, num_files, file_size_range, skip_dirs)
         depth -= 1
         while depth > 0:
             new_dirs = []

@@ -20,12 +20,13 @@ def get_parser():
     parser = argparse.ArgumentParser()
     # parser.add_argument('--bin', dest='bin_dir', type=str, required=True, help='Directory where bin can be found')
     parser.add_argument('-t', dest='target_dir', type=str, required=True, help='Directory to run tests at')
+    parser.add_argument('--skip_cleanup', dest='skip_cleanup', default=False, action='store_true')
 
     return parser
 
 class SingleFileGraph:
     def __init__(self, target_dir):
-        self.target_dir = target_dir
+        self.work_dir = os.path.join(target_dir, NAME)
         self.sizes = None
 
         self._init_sizes()
@@ -53,18 +54,24 @@ class SingleFileGraph:
     def get_root_name(self, size):
         return f'rootdir_{size}'
 
+    def get_root_path(self, size):
+        return os.path.join(self.work_dir, self.get_root_name(size))
+
     def create_required_workloads(self):
         for size in self.sizes:
-            work_gen = DirCreator(self.get_root_name(size))
+            root_path = self.get_root_path(size)
+            work_gen = DirCreator(root_path)
             work_gen.create(1, 0, 1, (size, size))
 
     def setup_wdir(self):
-        if os.path.exists(os.path.join(self.target_dir, NAME)):
-            print("Error, directory already exists!")
+        if os.path.exists(os.path.join(self.work_dir)):
+            raise Exception(f"Error, working dir {self.work_dir} directory already exists!")
+        os.mkdir(self.work_dir)
+        
 
     def cleanup(self):
         for size in self.sizes:
-            shutil.rmtree(self.get_root_name(size))
+            shutil.rmtree(self.get_root_path(size))
 
 
 def parse():
@@ -74,9 +81,13 @@ def parse():
 
 def main():
     parsed = parse()
+
     graph = SingleFileGraph(target_dir=parsed.target_dir)
+    graph.setup_wdir()
     graph.create_required_workloads()
-    graph.cleanup()
+
+    if not parsed.skip_cleanup:
+        graph.cleanup()
 
 if __name__ == '__main__':
     main()
