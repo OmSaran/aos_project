@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import json
+import statistics
 from copy import deepcopy
 from time import time as orig_time
 
@@ -50,16 +51,29 @@ class GenericGraph():
             self._results_dir = self._work_dir
         
         self._created_dirs = []
-        self._results = {
-            'fcp':  {
-                self._variant_param: [],
-                'time': []
-            },
-            'cp': {
-                self._variant_param: [],
-                'time': []
-            }
+
+        res = {
+            self._variant_param: [],
+            'time_mean': [],
+            'time_std_dev': [],
+            'real_time_mean': [],
+            'real_time_std_dev': [],
+            'user_time_mean': [],
+            'user_time_std_dev': [],
+            'sys_time_mean': [],
+            'sys_time_std_dev': []
         }
+        self._results = {
+            'fcp':  deepcopy(res),
+            'cp': deepcopy(res)
+        }
+
+        self._validate()
+
+    def _validate(self):
+        path = self._get_results_path()
+        if os.path.exists(path):
+            raise Exception(f"Results file {path} already exists")
 
     def setup_wdir(self):
         if os.path.exists(self._work_dir):
@@ -70,12 +84,16 @@ class GenericGraph():
         return f'rootdir_{suffix}'
 
     def _get_root_path(self, suffix):
+        if not self._is_dircr_variant():
+            return os.path.join(self._work_dir, self._get_root_name(self._variant_values[0]))
         return os.path.join(self._work_dir, self._get_root_name(suffix))
 
     def _get_copy_root_name(self, suffix):
         return f'cp_rootdir_{suffix}'
 
     def _get_copy_root_path(self, suffix):
+        if not self._is_dircr_variant():
+            return os.path.join(self._work_dir, self._get_copy_root_name(self._variant_values[0]))
         return os.path.join(self._work_dir, self._get_copy_root_name(suffix))
 
     def _get_dir_args(self, variant_val):
@@ -87,13 +105,26 @@ class GenericGraph():
             num_files = variant_val
         return file_size, num_files
 
+    def _is_dircr_variant(self):
+        if self._variant_param in {'num_files', 'file_size_bytes', 'depth'}:
+            return True
+        return False
+
     def create_required_workloads(self):
-        for val in self._variant_values:
-            root_path = self._get_root_path(val)
+        # FIXME: We don't need to create multiple files unless the variant is either num_files or file_size
+        if not self._is_dircr_variant():
+            root_path = self._get_root_path(self._variant_values[0])
             self._created_dirs.append(root_path)
             work_gen = DirCreator(root_path)
-            file_size, num_files = self._get_dir_args(val)
+            file_size, num_files = self._get_dir_args(self._variant_values[0])
             work_gen.create(1, 0, num_files, (file_size, file_size))
+        else:
+            for val in self._variant_values:
+                root_path = self._get_root_path(val)
+                self._created_dirs.append(root_path)
+                work_gen = DirCreator(root_path)
+                file_size, num_files = self._get_dir_args(val)
+                work_gen.create(1, 0, num_files, (file_size, file_size))
 
     def _ensure_not_present(self, path):
         if os.path.exists(path):
@@ -106,24 +137,63 @@ class GenericGraph():
         return os.path.join(self._bin_dir, ORIGINAL_CP_BIN_NAME)
 
     def _drop_cache(self):
+        debug("doing sync")
+        os.sync()
         debug("dropping cache")
         with open('/proc/sys/vm/drop_caches', 'w') as fh:
             fh.write('3')
 
-    def _run_cmd(self, command):
-        debug(f'Executing command {" ".join(command)}')
-        self._drop_cache()
-        
-        t1 = time()
-        proc = subprocess.Popen(command)
-        ret = proc.wait()
-        t2 = time()
-        if(ret != 0):
-            raise Exception(f'Error doing copy for command: {command}')
-        
-        debug(f'{t2-t1} is the time taken')
+    def _run_cmd(self, command, dst_path):
+        num_times = 5
 
-        return t2 - t1
+        sys_times = []
+        user_times = []
+        real_times = []
+        ptimes = []
+
+        time_cmd = '/usr/bin/time -f %e\n%U\n%S'.split(' ')
+        command = time_cmd + command
+
+        debug(f'Executing command {" ".join(command)} {num_times} times')
+
+        for _ in range(num_times):
+            self._drop_cache()
+
+            proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            t1 = time()
+            ret = proc.wait()
+            t2 = time()
+            if(ret != 0):
+                err = proc.stderr.read().decode()
+                raise Exception(f'Error doing copy for command: {command}: {err}')
+
+            out = proc.stdout.read().decode()
+            err = proc.stderr.read().decode()
+
+            debug(out)
+            debug(err)
+
+            time_op = err.split()
+            sys_time = float(time_op[-1])
+            user_time = float(time_op[-2])
+            real_time = float(time_op[-3])
+
+            sys_times.append(sys_time)
+            user_times.append(user_time)
+            real_times.append(real_time)
+            ptimes.append(t2-t1)
+            
+            debug(f'{t2-t1} is the ptime taken')
+
+            shutil.rmtree(dst_path)
+
+
+        return {
+            'real_times': real_times, 
+            'user_times': user_times, 
+            'sys_times': sys_times, 
+            'ptimes': ptimes
+        }
 
     def _get_fcp_opts(self, variant_val):
         opts = ''
@@ -132,7 +202,10 @@ class GenericGraph():
 
         for k, v in config.items():
             if v.get('fcp_flag'):
-                if k == 'sq_poll' and v ['default'] == False:
+                if isinstance(v['default'], bool):
+                    if not v['default']:
+                        continue
+                    opts += f'{v["fcp_flag"]} '
                     continue
                 opts += f'{v["fcp_flag"]} {v["default"]} '
 
@@ -163,33 +236,43 @@ class GenericGraph():
         command = f'{bin_path} ' + self._get_cp_opts(variant_val) + f'-r {src_path} {dst_path}'
         return command.split()
 
-    def _run_workload_fcp(self, variant_val):
+    def _run_workload_type(self, variant_val, cp_type):
         src_path = self._get_root_path(variant_val)
         dst_path = self._get_copy_root_path(variant_val)
 
         self._ensure_not_present(dst_path)
-        command = self._get_command_fcp(src_path, dst_path, variant_val)
+        if cp_type == 'fcp':
+            command = self._get_command_fcp(src_path, dst_path, variant_val)
+        elif cp_type == 'cp':
+            command = self._get_command_cp(src_path, dst_path, variant_val)
+        else:
+            raise Exception("Unknown cp type")
         
-        t = self._run_cmd(command)
+        t = self._run_cmd(command, dst_path)
+        real_times = t['real_times']
+        user_times = t['user_times']
+        sys_times = t['sys_times']
+        ptimes = t['ptimes']
 
-        self._results['fcp'][self._variant_param].append(variant_val)
-        self._results['fcp']['time'].append(t)
+        self._results[cp_type][self._variant_param].append(variant_val)
+        
+        self._results[cp_type]['time_mean'].append(statistics.mean(ptimes))
+        self._results[cp_type]['time_std_dev'].append(statistics.stdev(ptimes))
 
-        shutil.rmtree(dst_path)    
+        self._results[cp_type]['real_time_mean'].append(statistics.mean(real_times))
+        self._results[cp_type]['real_time_std_dev'].append(statistics.stdev(real_times))
+
+        self._results[cp_type]['user_time_mean'].append(statistics.mean(user_times))
+        self._results[cp_type]['user_time_std_dev'].append(statistics.stdev(user_times))
+
+        self._results[cp_type]['sys_time_mean'].append(statistics.mean(sys_times))
+        self._results[cp_type]['sys_time_std_dev'].append(statistics.stdev(sys_times))
+
+    def _run_workload_fcp(self, variant_val):
+        self._run_workload_type(variant_val, 'fcp')
     
     def _run_workload_cp(self, variant_val):
-        src_path = self._get_root_path(variant_val)
-        dst_path = self._get_copy_root_path(variant_val)
-
-        self._ensure_not_present(dst_path)
-        command = self._get_command_cp(src_path, dst_path, variant_val)
-        
-        t = self._run_cmd(command)
-
-        self._results['cp'][self._variant_param].append(variant_val)
-        self._results['cp']['time'].append(t)
-
-        shutil.rmtree(dst_path)
+        self._run_workload_type(variant_val, 'cp')
 
     def run_workloads_fcp(self):
         for val in self._variant_values:
@@ -252,7 +335,7 @@ def get_params_info():
             'fcp_flag': '-n'
         },
         'buffer_size_kb': {
-            'default': 4096,
+            'default': 128,
             'fcp_flag': '-b',
             'cp_flag': '-b'
         },
@@ -286,6 +369,9 @@ def get_parsed():
     for k, v in config.get('invariants', {}).items():
         params[k]['default'] = v
     
+    if config['variant']['param'] not in params:
+        raise Exception(f"Unknown variant parameter {config['variant']['param']}")
+
     ret = {
         'variant': {
             'param': config['variant']['param'],
