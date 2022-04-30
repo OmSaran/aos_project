@@ -1,0 +1,98 @@
+{
+  "meta": {
+    "name": "sf_buffer_test_sq_poll",
+    "commit": "8097ae54ba22c655f4cc31b3e25ee561501f4ee6",
+    "parsed_config": {
+      "variant": {
+        "param": "buffer_size_kb",
+        "values": [
+          4,
+          8,
+          16,
+          512,
+          1024,
+          2048,
+          4096,
+          8192
+        ]
+      },
+      "params_info": {
+        "file_size_bytes": {
+          "default": 1073741824
+        },
+        "num_files": {
+          "default": 1
+        },
+        "sq_poll": {
+          "default": true,
+          "fcp_flag": "-k"
+        },
+        "num_buffers": {
+          "default": 1,
+          "fcp_flag": "-n"
+        },
+        "buffer_size_kb": {
+          "default": 4096,
+          "fcp_flag": "-b",
+          "cp_flag": "-b"
+        },
+        "ring_size": {
+          "default": 16732,
+          "fcp_flag": "-q"
+        }
+      },
+      "name": "sf_buffer_test_sq_poll",
+      "target_dir": "/dev/shm",
+      "bin_dir": "/home/cc/aos/aos_project/build",
+      "skip_cleanup": false,
+      "run_cp": true,
+      "results_dir": "/home/cc/aos/aos_project/results"
+    }
+  },
+  "data": {
+    "fcp": {
+      "buffer_size_kb": [
+        4,
+        8,
+        16,
+        512,
+        1024,
+        2048,
+        4096,
+        8192
+      ],
+      "time": [
+        0.7892310619354248,
+        0.7164053916931152,
+        0.5261006355285645,
+        0.3488152027130127,
+        0.34560418128967285,
+        0.3517313003540039,
+        0.34146761894226074,
+        0.3438267707824707
+      ]
+    },
+    "cp": {
+      "buffer_size_kb": [
+        4,
+        8,
+        16,
+        512,
+        1024,
+        2048,
+        4096,
+        8192
+      ],
+      "time": [
+        0.42626523971557617,
+        0.3786001205444336,
+        0.35273027420043945,
+        0.3258056640625,
+        0.3227066993713379,
+        0.32572340965270996,
+        0.3183572292327881,
+        0.31916069984436035
+      ]
+    }
+  }
+}
