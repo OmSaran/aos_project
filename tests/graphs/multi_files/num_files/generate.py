@@ -8,7 +8,7 @@ import json
 # NOTE: self._rq_sizes can be modified
 
 DEFAULT_FILE_SIZE = 1 << 20 # 1MB
-NUM_FILES = [x for x in range(10, 10000, 100)]
+NUM_FILES = [x for x in range(0, 10, 1) if x != 0]
 
 
 DEBUG = True
@@ -50,14 +50,18 @@ class SingleFileRQGraph(BaseFileGraph):
         self._num_files_list = NUM_FILES
         self._max_num = max(self._num_files_list)
 
+        self._created_directories = []
+
     def create_required_workloads(self):
         for num_files in self._num_files_list:
             root_path = self.get_root_path(num_files)
+            self._created_directories.append(root_path)
             work_gen = DirCreator(root_path)
             work_gen.create(1, 0, num_files, (self._filesize, self._filesize))
         
     def cleanup(self):
-        shutil.rmtree(self.get_root_path(self._filesize))
+        for direc in self._created_directories:
+            shutil.rmtree(direc)
 
     def _get_command_fcp(self, src_path, dst_path):
         bin_path = self._get_fcp_path()
