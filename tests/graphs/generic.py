@@ -97,8 +97,8 @@ class GenericGraph():
         return os.path.join(self._bin_dir, ORIGINAL_CP_BIN_NAME)
 
     def _drop_cache(self):
-        # with open('/proc/sys/vm/drop_caches', 'w') as fh:
-        #     fh.write('3')
+        with open('/proc/sys/vm/drop_caches', 'w') as fh:
+            fh.write('3')
         return
 
     def _run_cmd(self, command):
@@ -198,6 +198,7 @@ class GenericGraph():
         res = {
             'meta': {
                 'name': self._name,
+                'commit': self._get_commit(),
                 'parsed_config': self._config
             },
             'data': self._results
@@ -206,6 +207,16 @@ class GenericGraph():
 
     def _get_cp_results_path(self):
         return os.path.join(self._work_dir, 'results.json')
+
+    def _get_commit(self):
+        cmd = "git rev-parse HEAD"
+        proc = subprocess.Popen(cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ret = proc.wait()
+        if ret != 0:
+            raise Exception(f"Failed to get commit {proc.stderr.read().decode()}")
+        commit = proc.stdout.read().decode().strip()
+        debug(f"Got the commit id {commit}")
+        return commit
 
     def dump_results(self):
         path = self._get_cp_results_path()
