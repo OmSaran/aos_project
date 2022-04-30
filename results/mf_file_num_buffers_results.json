@@ -1,0 +1,86 @@
+{
+  "meta": {
+    "name": "mf_file_num_buffers",
+    "commit": "432332f66b08e463f69b595cd2bba452c5fd5b54",
+    "parsed_config": {
+      "variant": {
+        "param": "num_buffers",
+        "values": [
+          1,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          20,
+          30,
+          100
+        ]
+      },
+      "params_info": {
+        "file_size_bytes": {
+          "default": 4194304
+        },
+        "num_files": {
+          "default": 10000
+        },
+        "sq_poll": {
+          "default": false,
+          "fcp_flag": "-k"
+        },
+        "num_buffers": {
+          "default": 10,
+          "fcp_flag": "-n"
+        },
+        "buffer_size_kb": {
+          "default": 1024,
+          "fcp_flag": "-b",
+          "cp_flag": "-b"
+        },
+        "ring_size": {
+          "default": 16732,
+          "fcp_flag": "-q"
+        }
+      },
+      "name": "mf_file_num_buffers",
+      "target_dir": "/dev/shm",
+      "bin_dir": "/home/cc/aos/aos_project/build",
+      "skip_cleanup": false,
+      "run_cp": false,
+      "results_dir": "/home/cc/aos/aos_project/results"
+    }
+  },
+  "data": {
+    "fcp": {
+      "num_buffers": [
+        1,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        20,
+        30,
+        100
+      ],
+      "time": [
+        11.663738012313843,
+        10.619282960891724,
+        7.54523491859436,
+        7.8588597774505615,
+        5.730597496032715,
+        8.046844720840454,
+        7.873294353485107,
+        9.223543882369995,
+        13.429465770721436,
+        17.786855936050415
+      ]
+    },
+    "cp": {
+      "num_buffers": [],
+      "time": []
+    }
+  }
+}
