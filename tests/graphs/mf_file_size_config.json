@@ -1,0 +1,19 @@
+{
+    "name": "mf_file_size_sq_poll",
+    "bin_dir": "/home/cc/aos/aos_project/build",
+    "target_dir": "/dev/shm",
+    "variant": {
+        "param": "file_size_bytes",
+        "values": [4096, 1048576, 4194304]
+    },
+    "invariants": {
+        "sq_poll": true,
+
+        "num_files": 10000,
+        "file_size_bytes": 1073741824,
+        "num_buffers": 10,
+        "ring_size": 16732,
+        "buffer_size_kb": 1024
+    },
+    "run_cp": false
+}
