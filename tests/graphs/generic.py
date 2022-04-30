@@ -25,6 +25,11 @@ def debug(*args, **kwargs):
         return
     print(*args, **kwargs)
 
+def info(*args, **kwargs):
+    if not DEBUG:
+        return
+    print(*args, **kwargs)
+
 # FIXME: hack
 sys.path.append('../../')
 
@@ -39,6 +44,10 @@ class GenericGraph():
         self._variant_param = self._variant['param']
         self._variant_values = self._variant['values']
         self._bin_dir = config['bin_dir']
+        if config.get('results_dir'):
+            self._results_dir = config['results_dir']
+        else:
+            self._results_dir = self._work_dir
         
         self._created_dirs = []
         self._results = {
@@ -70,9 +79,9 @@ class GenericGraph():
         return os.path.join(self._work_dir, self._get_copy_root_name(suffix))
 
     def _get_dir_args(self, variant_val):
-        file_size = self._config['params_info']['file_size']['default']
+        file_size = self._config['params_info']['file_size_bytes']['default']
         num_files = self._config['params_info']['num_files']['default']
-        if self._variant_param == 'file_size':
+        if self._variant_param == 'file_size_bytes':
             file_size = variant_val
         elif self._variant_param == 'num_files':
             num_files = variant_val
@@ -97,9 +106,9 @@ class GenericGraph():
         return os.path.join(self._bin_dir, ORIGINAL_CP_BIN_NAME)
 
     def _drop_cache(self):
+        debug("dropping cache")
         with open('/proc/sys/vm/drop_caches', 'w') as fh:
             fh.write('3')
-        return
 
     def _run_cmd(self, command):
         debug(f'Executing command {" ".join(command)}')
@@ -205,8 +214,8 @@ class GenericGraph():
         }
         return res
 
-    def _get_cp_results_path(self):
-        return os.path.join(self._work_dir, 'results.json')
+    def _get_results_path(self):
+        return os.path.join(self._results_dir, f'{self._name}_results.json')
 
     def _get_commit(self):
         cmd = "git rev-parse HEAD"
@@ -219,15 +228,16 @@ class GenericGraph():
         return commit
 
     def dump_results(self):
-        path = self._get_cp_results_path()
+        path = self._get_results_path()
         res = self.get_results()
         with open(path, 'w') as fh:
             fh.write(json.dumps(res, indent=2))
+        info(f"Results at {os.path.abspath(path)}")
 
 
 def get_params_info():
     params = {
-        'file_size': {
+        'file_size_bytes': {
             'default': 1 << 20,
         },
         'num_files': {
@@ -241,7 +251,7 @@ def get_params_info():
             'default': 1,
             'fcp_flag': '-n'
         },
-        'buffer_size': {
+        'buffer_size_kb': {
             'default': 4096,
             'fcp_flag': '-b',
             'cp_flag': '-b'
@@ -259,6 +269,8 @@ def get_parser():
     parser.add_argument('--bin', dest='bin_dir', type=str, required=False, help='Override directory where binaries (cp, fcp) can be found')
     parser.add_argument('-t', dest='target_dir', type=str, required=False, help='Override directory to run tests at')
     parser.add_argument('-f', dest='config_path', type=str, required=False, default='config.json', help='Config file path')
+    parser.add_argument('-k', dest='sq_poll', type=str, required=False, help='Enable sq poll')
+    parser.add_argument('-r', dest='results_dir', type=str, required=False, help='Results will be created at this location')
 
     return parser
 
@@ -292,6 +304,12 @@ def get_parsed():
         ret['bin_dir'] = parsed.bin_dir
     if parsed.target_dir:
         ret['target_dir'] = parsed.target_dir
+    if parsed.sq_poll is not None:
+        ret['params_info']['sq_poll']['default'] = parsed.sq_poll
+    if parsed.results_dir is not None:
+        ret['results_dir'] = os.path.abspath(parsed.results_dir)
+        if not os.path.exists(parsed.results_dir):
+            raise Exception(f"Results dir {parsed.results_dir} does not exist")
 
     debug(f'Parsed the following config {json.dumps(ret, indent=2)}')
     return ret
