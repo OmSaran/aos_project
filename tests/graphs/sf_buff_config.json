@@ -1,0 +1,17 @@
+{
+    "name": "sf_buffer_test",
+    "bin_dir": "/home/cc/aos/aos_project/build",
+    "target_dir": "/dev/shm",
+    "variant": {
+        "param": "buffer_size_kb",
+        "values": [4, 8, 16, 512, 1024, 2048, 4096, 8192]
+    },
+    "invariants": {
+        "sq_poll": false,
+        "num_files": 1,
+        "file_size_bytes": 1073741824,
+        "num_buffers": 1,
+        "ring_size": 16732
+    },
+    "run_cp": true
+}
