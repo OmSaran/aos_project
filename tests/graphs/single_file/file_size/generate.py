@@ -10,10 +10,20 @@ DEBUG = True
 
 # hack
 sys.path.append('../../../')
+sys.path.append('../')
 
 from generator import DirCreator
-from tests.graphs.base_generate import BaseFileGraph, debug, time
+from base_generate import BaseFileGraph
 
+from time import time as orig_time
+
+def debug(*args, **kwargs):
+    if DEBUG:
+        print(*args, **kwargs)
+
+#! TODO: Find way to do REAL time instead of wall clock
+def time():
+    return orig_time()
 
 def get_parser():
     parser = argparse.ArgumentParser()

@@ -1,9 +1,0 @@
-{
-    "name": "buffer_test",
-    "bin_dir": "/home/cc/aos/aos_project/build",
-    "target_dir": "/home/cc/aos/aos_project/tests/graphs/multi_files/buffer_size",
-    "variant": {
-        "param": "buffer_size",
-        "values": [4096, 8192]
-    }
-}
