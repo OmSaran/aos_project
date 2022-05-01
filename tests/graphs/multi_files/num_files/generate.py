@@ -33,7 +33,7 @@ def get_parser():
 
     return parser
 
-class SingleFileRQGraph(BaseFileGraph):
+class MultiFileNumFilesGraph(BaseFileGraph):
     NAME = 'graph_bench_multi_num_files'
     def __init__(self, target_dir, bin_dir, skip_sanity, skip_drop, file_size, sq_poll):
         super().__init__(target_dir, bin_dir, skip_sanity, skip_drop)
@@ -108,7 +108,7 @@ def parse():
 def main():
     parsed = parse()
 
-    graph = SingleFileRQGraph(target_dir=parsed.target_dir, bin_dir=parsed.bin_dir, skip_sanity=parsed.skip_sanity, skip_drop=parsed.skip_drop, 
+    graph = MultiFileNumFilesGraph(target_dir=parsed.target_dir, bin_dir=parsed.bin_dir, skip_sanity=parsed.skip_sanity, skip_drop=parsed.skip_drop, 
         file_size=parsed.file_size, sq_poll=parsed.sq_poll)
     graph.setup_wdir()
     graph.create_required_workloads()
