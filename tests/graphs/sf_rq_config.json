@@ -12,7 +12,8 @@
         "num_files": 1,
         "file_size_bytes": 1073741824,
         "num_buffers": 1,
-        "ring_size": 16732
+        "ring_size": 16732,
+        "buffer_size_kb": 1024
     },
     "run_cp": false
 }
