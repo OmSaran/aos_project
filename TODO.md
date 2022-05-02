@@ -38,10 +38,17 @@
 
 10. Graphs
 
-### Tasks
+## Tasks
 1. multiple buffers for single file
     - if speedup from parallel writes to memory, perf for a single file++
-2. cost of atomics    
+2. cost of atomics
+    - also for 1M 1B files
+    - benchmark `__io_uring_peek_cqe`
+3. Turn off fadvise/readahead
+    - does multifile get better?
+4. See cache hit/miss
+    - is the benefit really due to readahead?
+    - https://lwn.net/Articles/155510/
 
 11. Explain results:
     1. single file in SSD/Memory: 0 benefits
@@ -62,6 +69,11 @@
                 - `cp` can only use blocksize <= filesize, since serial
         - io_uring: initiate readahead on multiple files
             - happens in parallel with **copying**
+    3. multiple really small 1B files (\#bufs = 1)
+        - syscall should dominate --> it doesn't :(
+        - ~~maybe cost of atomic?~~ Unlikely, 100s of cycles at max
+        - wait_nr does a system call
+
     3. io_uring ops aren't costless
         - atomic
     4. Pipeline stalls
@@ -86,10 +98,6 @@
     - ~~are reads being merged???~~
         - `iostat`: https://linux.die.net/man/1/iostat
 
-12. Results
-    - benefits because of multi-threaded I/O
-        - not multi-threaded execution
-        - not syscall overhead
 
 ## Graphs
 
@@ -134,7 +142,7 @@ Compare time taken by cp and fcp over:
     - w/ SQPOLL
     - on tmpfs
 
-7. Number of files open together
+7. ~~Number of files open together~~
     - openat is insanely slow sometimes -- **slowest** system call
         - should provide ~5% improvement! ! !
 
@@ -143,36 +151,123 @@ Compare time taken by cp and fcp over:
 - include standard deviations
 - include how we `sync` and drop the buffer cache before running
 
-### Optional (??)
-
-
-## Misc.
-1. For fairness, our own version of standard `cp` 
-2. block size, ring queue size, 
-
-3. Benefits from two areas:
-    - async in another kernel thread -- parallel processing of userspace and system call
-        - user time is negligible (~1-2us)
-    - syscall overhead
-        - ???
-        - strace
-            - million read/write, ~100 async version -- still no benefit
-
-4. Kernel Polling mode:
-
-4. RAMDisk
-
-Next steps:
 
 ## Report
 
-### Profiling
+1. io_uring overview
 
-1. calc hit-rate/miss-rate
-    - for single file, should be incredible high
-    - turn off fadvise --> should go down????
-2. strace -T
-3. Time taken by I/O vs time taken by processing
+3. potential benefits
+    - async: 
+        - free parallism b/w I/O and compute
+        - multi-threaded I/O, to saturate the device bandwidth
+        - threads managed automatically
+    - (almost) no syscall overhead: SQPOLL has 0, in theory
+
+4. problems
+    - some syscalls not supported: fstatat, mmap
+        - replacement requires two separate calls :(
+    - interrupt-driven wait, or poll on an atomic
+        - both have significant overhead w.r.t. system call
+        - but once every batch
+        - (TODO: add benchmark results)
+    - max queue size
+        - forced to be sequential after queue is full
+    - no fine grained control on threads
+    - imp issues
+      - LINKs are linear, also not across multiple submit calls
+    - polling API --> my god.
+
+5. Implementation Details
+
+6. Experiments & Results
+
+### Results
+
+0. Preliminaries:
+    - barebones cp, for fairness
+        - reasonably fast, matches `cp` for most purposes
+        - modern c++: string_view, etc.
+        - doesn't support all functions
+            - does support ....
+    - latest version of io_uring
+        - compiled the kernel ourselves by taking the latest + applying (unreleased) patches
+    - tmpfs
+    - sync + cache drop
+        - caching covered in 
+    - parameters
+    - scheduler, cpu-freq
+    - interrupt-based vs polling
+        - doesn't change results
+    - ???
+
+1. Performance on a single large file is not better:
+    - async b/w I/O and compute does not matter
+        - 'user' time when running `cp` is negligible (0.004 / 3.870 = 0.1% when copying 2GB on an SSD, less than noise)
+    - multi-threaded I/O doesn't make sense
+        - reads/writes are done in series, for readahead
+            - random I/O will be way slower
+    - syscall overhead is also negligible
+        - (add `strace -c` values)
+        - (note `openat`, and others values, usually <100us!)
+    - note that still have the benefits of being async
+        - user thread can do some other work
+
+2. Performance on a single large file on tmpfs is not better:
+   
+
+3. Performance for a single small file is not better:
+    - async b/w I/O and compute doesn't matter
+        - 'user' time when running `cp` is 0
+    - syscall overhead is also negligible 
+        - (add `strace -c` values): `strace` shows system call takes <=100us (\~1% of total running time)
+        - actual overhead will be even less
+
+
+4. Multi-file/large buffer is much better
+    - cp w/ RANDOM is SLOW
+        - larger buffer helps a tiny bit here (3.8 to 3.5 when 1GB multi file)
+        - because reading sequentially from disk in one request is slightly faster, even for SSD
+    - fcp remains the same! ! !
+    - **Reason**: queue depth. queuing up multiple read requests is much faster! !
+        - test: iostat
+        - test: reduce queue_depth to 1
+            - `echo 1 | sudo tee /sys/bus/scsi/devices/<SCSI-DEVICE>/queue_depth`
+            - Ref: https://www.ibm.com/docs/en/linux-on-systems?topic=devices-setting-queue-depth
+            - Note that SATA devices speak SCSI to the kernel's generic disk driver, hence in scsi!
+    **Discarded results**
+        - saturating bandwidth -- cp w/ larger buffer should do better
+        - readahead theory
+            - disabling: only worsens `cp`'s performance, `fcp` remains the same
+        - reads being merged! ! !
+            - iostat says otherwise!
+            - most likely that our buffer was already big enough that merging doesn't make much sense
+        - NUMA nodes
+          - each socket have its own bus
+          - Total memory bandwidth = 2*PerNodeBandwidth
+            - nope: `numactl -N 0 -m 0` doesn't change things :(
+
+## PPT
+- must mention system specs:
+    - include SATA SSD!!!
+ - include how atomics have a cost too
+ - why did we do reads/writes serially
+    - well, parallel would require higher buffer size
+        - unfair to regular cp
+    - we wanted to see benefit of async + system call
+ - show strace system call cost (lower bound!)
+    - include that 4M vs 100 visual!!!
+    - actual overhead is muchhhhh lower
+    - everyone keeps crying about system call overhead, context switching costs
+        - my cp will save the linux community years!
+- mention that its still async
+    - free concurrency!
+
+- kept trying to optimize/profile our code
+    - 
+- SSD Driver: https://www.yellow-bricks.com/2014/06/09/queue-depth-matters/
+
+
+### Profiling
 
 
 ### Implementation Details
@@ -183,17 +278,16 @@ Next steps:
 3. Handling limited \# of buffers
     - future work: use a better memory allocator
 
-- What we tried/failed/didn't do
-    - fully pipelined version: bad performance (why?)
-    - threads: justify
+4. We also tried a fully pipelined version
+    - DIAGRAM! ! !
+    - Explain how it worked!
+    - it performed slower --> we shifted to a simpler implementation
+    - Reasons (+ data!) to believe that a pipelined version, however well optimized, won't do any better.
+    - similar for multithreaded
 
 
 ### Other Sections
 
-- justify decisions:
-    - what is the "cost" of one syscall?
-    - in comparison with copying from disk to file?
-    - SSD Driver: https://www.yellow-bricks.com/2014/06/09/queue-depth-matters/
 
 - For large file sizes (1GB+), time to copy dominates in the program irrespective of the buffer size chosen
     - no discernable benefits (time to copy within 2%)
@@ -202,7 +296,6 @@ Next steps:
     - multiple read/write
     - io_uring setup is considerable
 - Adaptive File Read-Ahead!
-    - https://lwn.net/Articles/155510/
     - single file :(
 
 - syscall time is negligible: 4M in standard cp, vs ~150 in cp using io_uring.
@@ -212,17 +305,12 @@ Next steps:
 - only benefit -- "free" concurrency; can do a bunch of tasks
 
 - flush filesystem buffer cache before running the benchmarks
-- a barebones version of standard cp, made by us
-    - reasonably fast, matches `cp` for most purposes
-    - modern c++: string_view, etc.
-    - doesn't support all functions
-        - does support ....
+
 - ramdisk
 - parameters tuned:
     - file size
     - buffer size
     - size of async I/O queue
     - polling kernel thread
-- latest version of io_uring
-    - compiled the kernel ourselves by taking the latest + applying (unreleased) patches
+
 - profile: time taken by syscalls by strace, and time taken by our program by perf

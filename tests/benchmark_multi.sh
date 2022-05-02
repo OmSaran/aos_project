@@ -48,11 +48,11 @@ echo "Clearing buffer cache"
 sync
 echo 3 > /proc/sys/vm/drop_caches
 
-# iostat -x -z -k -d 1 > stuff &
+iostat -x -z -k -d 1 > stuff &
 if [ $# -gt 3 ]
 then
-    strace -T "$3" -r ${@:4} $FILEDIR $FILEDIRCOPY
+    time "$3" -r ${@:4} $FILEDIR $FILEDIRCOPY
 else
-    strace -T "$3" -r $FILEDIR $FILEDIRCOPY
+    time "$3" -r $FILEDIR $FILEDIRCOPY
 fi
-# trap 'kill $(jobs -p)' EXIT
+trap 'kill $(jobs -p)' EXIT
