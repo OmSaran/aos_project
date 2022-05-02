@@ -1,0 +1,107 @@
+{
+  "meta": {
+    "name": "mf_file_size_sq_poll",
+    "commit": "c7e57aa176f15f442ed8aeec9fdb14a14f9455b2",
+    "parsed_config": {
+      "variant": {
+        "param": "file_size_bytes",
+        "values": [
+          4096,
+          1048576,
+          4194304
+        ]
+      },
+      "params_info": {
+        "file_size_bytes": {
+          "default": 1073741824
+        },
+        "num_files": {
+          "default": 10000
+        },
+        "sq_poll": {
+          "default": true,
+          "fcp_flag": "-k"
+        },
+        "num_buffers": {
+          "default": 10,
+          "fcp_flag": "-n"
+        },
+        "buffer_size_kb": {
+          "default": 1024,
+          "fcp_flag": "-b",
+          "cp_flag": "-b"
+        },
+        "ring_size": {
+          "default": 16732,
+          "fcp_flag": "-q"
+        }
+      },
+      "name": "mf_file_size_sq_poll",
+      "target_dir": "/dev/shm/rerun",
+      "bin_dir": "/home/cc/aos/aos_project/build",
+      "skip_cleanup": false,
+      "run_cp": false,
+      "results_dir": "/home/cc/aos/aos_project/new_results"
+    }
+  },
+  "data": {
+    "fcp": {
+      "file_size_bytes": [
+        4096,
+        1048576,
+        4194304
+      ],
+      "time_mean": [
+        0.1272052764892578,
+        1.872058629989624,
+        6.652763557434082
+      ],
+      "time_std_dev": [
+        0.0025492247056089347,
+        0.11699871986195409,
+        0.8280152636258357
+      ],
+      "real_time_mean": [
+        0.12,
+        1.866,
+        6.648
+      ],
+      "real_time_std_dev": [
+        0.0,
+        0.11844830095868832,
+        0.8275083081153928
+      ],
+      "user_time_mean": [
+        0.02,
+        1.74,
+        6.55
+      ],
+      "user_time_std_dev": [
+        0.0070710678118654745,
+        0.11661903789690596,
+        0.8208532146492453
+      ],
+      "sys_time_mean": [
+        0.316,
+        5.826,
+        21.628
+      ],
+      "sys_time_std_dev": [
+        0.008944271909999166,
+        0.1285690475970016,
+        0.9327754284928395
+      ]
+    },
+    "cp": {
+      "file_size_bytes": [],
+      "time_mean": [],
+      "time_std_dev": [],
+      "real_time_mean": [],
+      "real_time_std_dev": [],
+      "user_time_mean": [],
+      "user_time_std_dev": [],
+      "sys_time_mean": [],
+      "sys_time_std_dev": []
+    }
+  }
+}

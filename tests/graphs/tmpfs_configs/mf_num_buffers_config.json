@@ -1,0 +1,19 @@
+{
+    "name": "mf_file_num_buffers",
+    "bin_dir": "/home/cc/aos/aos_project/build",
+    "target_dir": "/dev/shm",
+    "variant": {
+        "param": "num_buffers",
+        "values": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 100]
+    },
+    "invariants": {
+        "sq_poll": false,
+
+        "num_files": 10000,
+        "file_size_bytes": 4194304,
+        "num_buffers": 10,
+        "ring_size": 16732,
+        "buffer_size_kb": 1024
+    },
+    "run_cp": false
+}
