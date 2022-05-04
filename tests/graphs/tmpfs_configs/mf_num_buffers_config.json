@@ -4,7 +4,7 @@
     "target_dir": "/dev/shm",
     "variant": {
         "param": "num_buffers",
-        "values": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 100]
+        "values": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 100, 1024]
     },
     "invariants": {
         "sq_poll": false,
