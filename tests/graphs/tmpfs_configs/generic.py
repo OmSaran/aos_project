@@ -32,7 +32,9 @@ def info(*args, **kwargs):
     print(*args, **kwargs)
 
 # FIXME: hack
-sys.path.append('../../')
+res = subprocess.run("git rev-parse --show-toplevel".split(), check=True, stdout=subprocess.PIPE)
+res = res.stdout.decode().strip()
+sys.path.append(res)
 
 from tests.generator import DirCreator
 

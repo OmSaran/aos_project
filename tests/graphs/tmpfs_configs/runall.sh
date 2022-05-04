@@ -10,5 +10,5 @@ mkdir op
 
 for i in `ls *_config.json`
 do
-DEBUG=1 python generic.py -f $i -r /home/cc/aos_project/new_results -t /home/cc/aos_project/tests/wdir --bin /home/cc/aos_project/build > op/stdout_$i.out 2> op/stderr_$i.out
+DEBUG=1 python generic.py -f $i -r /home/cc/aos_project/new_results_ssd_10k -t /home/cc/aos_project/tests/wdir --bin /home/cc/aos_project/build > op/stdout_$i.out 2> op/stderr_$i.out
 done
