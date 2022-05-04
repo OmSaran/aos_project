@@ -1,0 +1,143 @@
+{
+  "meta": {
+    "name": "mf_file_size_sq_poll",
+    "commit": "9fabfb42d7f2d8bb65aae3a88ec72ef3902c2dbb",
+    "parsed_config": {
+      "variant": {
+        "param": "file_size_bytes",
+        "values": [
+          4096,
+          1048576,
+          4194304
+        ]
+      },
+      "params_info": {
+        "file_size_bytes": {
+          "default": 1073741824
+        },
+        "num_files": {
+          "default": 1000
+        },
+        "sq_poll": {
+          "default": true,
+          "fcp_flag": "-k"
+        },
+        "num_buffers": {
+          "default": 10,
+          "fcp_flag": "-n"
+        },
+        "buffer_size_kb": {
+          "default": 1024,
+          "fcp_flag": "-b",
+          "cp_flag": "-b"
+        },
+        "ring_size": {
+          "default": 16732,
+          "fcp_flag": "-q"
+        }
+      },
+      "name": "mf_file_size_sq_poll",
+      "target_dir": "/home/cc/aos_project/tests/wdir",
+      "bin_dir": "/home/cc/aos_project/build",
+      "skip_cleanup": false,
+      "run_cp": true,
+      "results_dir": "/home/cc/aos_project/new_results"
+    }
+  },
+  "data": {
+    "fcp": {
+      "file_size_bytes": [
+        4096,
+        1048576,
+        4194304
+      ],
+      "time_mean": [
+        0.06852779388427735,
+        1.9758766651153565,
+        7.589500808715821
+      ],
+      "time_std_dev": [
+        0.001520885380610694,
+        0.00171541520336857,
+        0.029503791701933065
+      ],
+      "real_time_mean": [
+        0.06,
+        1.97,
+        7.5840000000000005
+      ],
+      "real_time_std_dev": [
+        0.0,
+        0.0,
+        0.031304951684996786
+      ],
+      "user_time_mean": [
+        0.014,
+        1.902,
+        7.564
+      ],
+      "user_time_std_dev": [
+        0.005477225575051661,
+        0.025884358211089524,
+        0.054129474410897764
+      ],
+      "sys_time_mean": [
+        0.152,
+        3.718,
+        14.106
+      ],
+      "sys_time_std_dev": [
+        0.010954451150103324,
+        0.04919349550499524,
+        0.06268971207463002
+      ]
+    },
+    "cp": {
+      "file_size_bytes": [
+        4096,
+        1048576,
+        4194304
+      ],
+      "time_mean": [
+        0.16574912071228026,
+        3.0852998733520507,
+        9.742108297348022
+      ],
+      "time_std_dev": [
+        0.003228897198271706,
+        0.004369988017523503,
+        0.027765749996196392
+      ],
+      "real_time_mean": [
+        0.16,
+        3.076,
+        9.736
+      ],
+      "real_time_std_dev": [
+        0.0,
+        0.005477225575051788,
+        0.02509980079602173
+      ],
+      "user_time_mean": [
+        0.01,
+        0.006,
+        0.008
+      ],
+      "user_time_std_dev": [
+        0.007071067811865475,
+        0.005477225575051661,
+        0.004472135954999579
+      ],
+      "sys_time_mean": [
+        0.054,
+        1.204,
+        3.878
+      ],
+      "sys_time_std_dev": [
+        0.008944271909999156,
+        0.01140175425099139,
+        0.008366600265340737
+      ]
+    }
+  }
+}

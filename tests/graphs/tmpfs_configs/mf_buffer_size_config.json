@@ -9,7 +9,7 @@
     "invariants": {
         "sq_poll": false,
 
-        "num_files": 10000,
+        "num_files": 1000,
         "file_size_bytes": 1048576,
         "num_buffers": 10,
         "ring_size": 16732,

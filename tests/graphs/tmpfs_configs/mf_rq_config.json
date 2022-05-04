@@ -1,5 +1,5 @@
 {
-    "name": "sf_rq_test",
+    "name": "mf_rq_test",
     "bin_dir": "/home/cc/aos/aos_project/build",
     "target_dir": "/dev/shm",
     "variant": {
@@ -9,7 +9,7 @@
     "invariants": {
         "sq_poll": false,
 
-        "num_files": 10000,
+        "num_files": 1000,
         "file_size_bytes": 1048576,
         "num_buffers": 10,
         "ring_size": 16732,
