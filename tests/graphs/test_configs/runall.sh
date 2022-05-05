@@ -9,7 +9,7 @@ TARGET_DIR=/home/cc/
 BIN_DIR=/home/cc/aos_project/build
 
 
-for i in `ls *mf_num_files_*config.json`
+for i in `ls *_config.json`
 do
 python run_test.py -f $i -r $RESULTS_DIR -t $TARGET_DIR --bin $BIN_DIR
 if [ $? -ne 0 ] 

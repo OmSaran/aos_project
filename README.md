@@ -58,9 +58,17 @@ All benchmark scripts and tests can be found inside the [tests/](./tests/) folde
     sudo ./benchmark.sh <size-in-MB> <num-files> <cp-executable> [opts] 
     ```
 
-4. (runall.sh?)
+4. To run a test: Choose a test config file from [tests/graphs/test_configs/](./tests/graphs/test_configs/) directory.
+    ```
+    python run_test.py -f <path_to_config_file> -r <result_directory_path> -t <target_directory_to_test> --bin <path_to_build_directory>
+    ```
+5. To run all tests: Go to [tests/graphs/test_configs/](./tests/graphs/test_configs/) directory.
+    ```
+    ./runall.sh
+    ```
+
 
 ## Results
-
-(How to generate?)
-(How to make graphs?)
+To generate results:  
+1. First run desired tests as described in step 4 or 5 above. 
+2. Use the jupyter notebook files (`.ipynb`) from [results_ssd_1k_cc/](./results_ssd_1k_cc/) directory to generate the results. Use the corresponding results (with matching name prefix) to generate the graphs.
