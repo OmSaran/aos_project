@@ -4,11 +4,17 @@ rm -rf /dev/shm/rerun
 mkdir /dev/shm/rerun
 mkdir op
 
-# INSTRUCTIONS:
-# 1. Add git rootdir to PYTHONPATH
-# 2. Do not forget to modify -r -t and --bin arguments in the command below
+RESULTS_DIR=/home/cc/
+TARGET_DIR=/home/cc/
+BIN_DIR=/home/cc/aos_project/build
 
-for i in `ls *_config.json`
+
+for i in `ls *mf_num_files_*config.json`
 do
-DEBUG=1 python generic.py -f $i -r /home/cc/aos_project/new_results_ssd_10k -t /home/cc/aos_project/tests/wdir --bin /home/cc/aos_project/build > op/stdout_$i.out 2> op/stderr_$i.out
+python run_test.py -f $i -r $RESULTS_DIR -t $TARGET_DIR --bin $BIN_DIR
+if [ $? -ne 0 ] 
+then 
+  echo "Failed"
+  exit 1 
+fi
 done
