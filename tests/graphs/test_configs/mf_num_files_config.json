@@ -4,7 +4,7 @@
     "target_dir": "/dev/shm",
     "variant": {
         "param": "num_files",
-        "values": [1, 4, 10]
+        "values": [1, 4, 10, 100, 1000, 5000, 10000]
     },
     "invariants": {
         "sq_poll": false,
